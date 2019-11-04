@@ -11,7 +11,7 @@ Related Issues:
 
 ## Detailed Design 
 
-### scoped values
+### EscapesThis and DoesNotEscape
 
 ### Expanding ref safe to escape
 
@@ -53,6 +53,26 @@ https://github.com/dotnet/csharplang/issues/992#issuecomment-357045213
 ### Better name for scoped
 The name `scoped` was chosen due to a lack of a better option. 
 
+## Considerations
+
+### Keywords vs. attributes
+This design calls for using attributes to annotate the new lifetime rules for 
+`ref` and `ref-struct` members. This also could've been done just as easily with
+contextual keywords. For instance: `scoped` and `escapes` could have been 
+used instead of `DoesNotEscape` and `EscapesThis`.
+
+Keywords, even the contextual ones, have a much heavier weight in the language
+than attributes. The use cases these features solve, while very valuable, 
+impact a small number of developers. Consider that only a fraction of 
+high end developers are defining `ref struct` instances and then consider that 
+only a fraction of those developers will be using these new lifetime features.
+That doesn't seem to justify adding a new contextual keyword to the language.
+
+This does mean that program correctness will be defined in terms of attributes
+though. That is a bit of a gray area for the language side of things but an 
+established pattern for the runtime. 
+
+### ref interface vs. normal interfaces
 
 ## Future Considerations
 
