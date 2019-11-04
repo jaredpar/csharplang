@@ -44,6 +44,10 @@ https://github.com/dotnet/csharplang/issues/992
 Consider downward facing only to fix the issues described in this comment
 https://github.com/dotnet/csharplang/issues/992#issuecomment-357045213
 
+### ref struct constraint
+
+### ref interfaces
+
 ## Open Issues
 
 ### Better name for scoped
