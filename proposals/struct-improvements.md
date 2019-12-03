@@ -1,12 +1,11 @@
-Function Pointers
+Struct Improvements
 =====
 
 ## Summary
-
-Related Issues:
-
-- https://github.com/dotnet/csharplang/issues/1147
-- https://github.com/dotnet/csharplang/issues/992
+This proposal is an aggregation of several different proposals for `struct` 
+performance improvements. The goal being a design which takes into account the
+various proposals to create a single overarching feature set for `struct` 
+improvements.
 
 ## Motivation
 
@@ -34,7 +33,7 @@ For example, “ref int” would be emitted as “ELEMENT_TYPE_BYREF ELEMENT_TYP
 
 This is about allowing the following:
 
-```
+```cs
 int i = 42;
 Span<int> s = ref i;
 ```
@@ -132,3 +131,15 @@ that we'd eventually have say `IDisposable` and `IRefDisposable`.
 ## Future Considerations
 
 ### Future Consideration 1
+
+## Related Information
+### Issues
+
+- https://github.com/dotnet/csharplang/issues/1147
+- https://github.com/dotnet/csharplang/issues/992
+- https://github.com/dotnet/csharplang/issues/1314
+- https://github.com/dotnet/csharplang/issues/2208
+
+### Proposals
+
+- https://github.com/dotnet/csharplang/blob/725763343ad44a9251b03814e6897d87fe553769/proposals/fixed-sized-buffers.md
