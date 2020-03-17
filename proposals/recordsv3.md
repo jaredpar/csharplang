@@ -1,7 +1,6 @@
 # Records 
 
 ## Language Building Blocks
-
 As the records discussions have progressed it's becoming clear there are a
 number of building block features that will come out of this effort. As LINQ
 produced expression lambdas and extension methods, records will produce several
@@ -63,21 +62,46 @@ var p = new Point() { X = 13; Y = 42 };
 ```
 
 ### Name Constructor Methods
+Records need to support initializer style expressions in scenarios other than
+standard object construction to support `with` expressions. This though is 
+simply adding a special property to a specific named method in a type. Records
+though are not alone in wanting to denote methods as being used exclusivel for
+construction. Factory methods serve the same purpose in .NET and are common
+throughout our framework.
 
+The ability to mark methods as being used exclusively for creation should 
+become a standalone feature. Developers will be able to mark members which 
+exist soley to create objects with `[ConstructorMethod]` and the language will
+give such methods the same flexibility as object constructors. That means 
+those methods can now be used in combination with object and collection 
+initializers.
 
+```cs
+public class Widget
+{
+    public string Name { get; set; }
+    public int Id { get; init; }
 
-Members attributed with `[ConstructorMethod]` are free to return types that are
-different than the containing type of the attributed member. It is common 
-practice for generic types to have non-generic types that serve as factory 
-members. 
+    internal Widget() { }
+}
 
-The `[ConstructorMethod]` attribute is only considered valid when the return 
-type of the method / property it's placed on has an implicit reference 
-conversion to the containing type of the method / property. The intent here is
-that types should own which methods are considered constructor.
+public static class WidgetFactory
+{
+    [ConstructorMethod]
+    public static Create() => new Widget();
+}
 
+var w = WidgetFactory.Create()
+{
+    Name = "JaredPar",
+    Id = 42;
+}
+```
 
-init only is a problem here ... how to enforce this????
+Members annotated with `[ConstructorMethod]` have the following restrictions:
+- Cannot be a `void` returning method
+- The return expression must be a `new` object expression, a member invocation 
+where the member is marked as `[ConstructorMethod]`, `null` or `default`.
 
 ### Validators
 
@@ -92,6 +116,35 @@ public data class C(int X, int Y)
     }
 }
 ```
+
+## Considerations
+
+### init only and ConstructorMethod
+One important property to keep in mind with `[ConstructorMethod]` is that it 
+must not violate the rules of init only and verifiers. The language will decide
+on rules for when object creation completes and `init` members flip to
+`readonly` and the verifier is run. These rules will eventually be codified in
+IL verification rules. 
+
+The `[ConstructorMethod]` feature must work within the bounds of these rules.
+That is why it's limited to returning `new` objects. This means it will 
+trivially meet the contract because the method does not have any references 
+to the object which would be percieved as fully constructed that it could 
+pass around even though the caller could still be freely mutating the object.
+It's also clear that the caller is responsible for running the verifier method
+not the callee. 
+
+One potential extension though is that we should allow more flexibility in 
+`[ConstructorMethod]` implementations where the return type of the member is 
+the same type as the containing type. The implication being that types should
+understand their contract and hence it's reasonable for them to create a new 
+instance, change internal state via method calls, field changes, etc ... and 
+then return the final instance. The type here is responsible for it's own 
+contract and hence is only hurting itself if it does illegal things. 
+
+Another potentional extension is to allow `unsafe` to violate normal 
+`[ConstructorMethod]` rules here. After all violating these rules is nominally 
+an IL safety violation so using `unsafe` as an escape is a sensible plan.
 
 ## Required reading
 https://github.com/dotnet/csharplang/blob/master/proposals/recordsv2.md
