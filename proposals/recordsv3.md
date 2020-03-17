@@ -1,4 +1,5 @@
-# Records 
+# Records
+The record of JaredPar's proposal for records. 
 
 ## Language Building Blocks
 As the records discussions have progressed it's becoming clear there are a
@@ -143,8 +144,19 @@ public class C
 ```
 
 ### Covariant Returns
-Records need to 
+Records need to have the `With` method both have a return type of the current
+static type of the record object as well as having the implementation return
+an object matching the current runtime type of the object.
 
+While records can support this with a complex piece of code generation, the 
+more natural implementation is to support covariant returns on `class` types as
+a general C# feature. This would allow the most natural definition of the `With`
+method with every type in the hierarchy replacing the return type with the 
+current record type.
+
+Note: while the majority of this document is written assuming that covariant 
+returns exist it's not strictly necessary. The consideration section details
+how the `With` generation could work without covariant returns
 
 ## Embracing Memberwise Clone
 This propsal is exploring what records would look like if `With` was truly a 
@@ -209,12 +221,97 @@ r = r with { X = 13 };
 There is no special casing for records needed here, it's just a fall out of 
 existing C# building block features
 
-### With implementation
-The 
+### With implementation for classes
+Records will now always emit two constructors in addition to any user defined
+constructors:
 
+1. The constructor matching the positional arguments. If no positional 
+arguments are defined on the record a parameterless constructor will be 
+generated instead. The accessibility will match that of the declaring `record`
+1. For a record of type `Record` the following will be emitted: 
+`protected Record(Record other)`
+
+The second costructor will effectively serve as a copy constructor. The body of
+the constructor, after calling `base`, will copy every field defined in the 
+record from `other` to `this`. 
+
+```cs
+record class Point(int X, int Y); 
+
+// Generates
+
+class Point {
+    public int X { get ; init; }
+    public int Y { get ; init; }
+
+    internal Point(int X, int Y) { ... }
+
+    protected Point(Point other) 
+    {
+        // Assign over the backing fields
+        <>X = other.<>X;
+        <>Y = other.<>Y;
+    }
+}
+```
+
+This deliberately will copy field by field instead of member by member as the 
+intent is for a member wise clone. Copying member by member would imply that 
+properties and their associated setters and validation runs during the `With` 
+operation. Such validation already ran for the initial object construction and
+running again would be redundant. Validation which should occur for every 
+constructed instance should be done in a validator instead.
+
+The implementation of the `With` method is now a trivial call to the copy 
+constructor. 
+
+```cs
+record class Point(int X, int Y);
+record class Point3D(int X, int Y, int Z) : Point;
+
+// Generates
+class Point
+{
+    // Other members omitted
+    protected Point(Point other) { ... }
+    public virtual Point With() => new Point(this);
+}
+
+class Point3D : Point
+{
+    protected Point3D(Point3D other) : base(other)
+    {
+        // Memberwise copy 
+    }
+
+    public overrides Point3D With() => new Point3D(this);
+}
+```
+
+### With implementation for structs
+The `With` implementation for `struct record` definitions will always be the 
+following for a record of type `Record`.
+
+```cs
+public Record With => this;
+```
+
+This simply and efficiently achieves the memberwise clone operation.
 
 ### Record Validators
+Records will define validators using the same syntax as other C# types. These
+will be no different in implementation than normal validators.
 
+```cs
+record class Point(int X, int Y)
+{
+    Point
+    {
+        if (X < 0) throw new ArgumentException(nameof(X));
+        if (Y < 0) throw new ArgumentException(nameof(Y));
+    }
+}
+```
 
 ## Considerations
 
@@ -245,8 +342,12 @@ Another potentional extension is to allow `unsafe` to violate normal
 `[ConstructorMethod]` rules here. After all violating these rules is nominally 
 an IL safety violation so using `unsafe` as an escape is a sensible plan.
 
-### Covariant returns
+### No covariant returns
 This gets even better with covariant returns
+
+### Use properties, not underlying fields
+
+
 
 ## Required reading
 https://github.com/dotnet/csharplang/blob/master/proposals/recordsv2.md
