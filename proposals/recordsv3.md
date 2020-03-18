@@ -442,8 +442,23 @@ However it provides a smoot transition to covariant returns when that feature
 becomes available from the runtime
 
 ### Use properties, not underlying fields
+The copy constructors can be seen to break expectations because they will 
+use backing fields instead of the `get` and `set` accessors defined by 
+developers. A sensible push back is that we should instead use the accessors
+because validation.
 
+If this pushback causes us to change course then we could use member wise 
+copy but it will also significantly complicate the feature. Copying all defined 
+fields is straight forward and has specific semantics. Copying every member is
+harder because it
 
+1. Will produce redundant copies. Traditional properties with hand written 
+backing fields will cause values to get copied twice as it's not possible to 
+perfectly associate the fields with the properties.
+1. Have to rationalize what to do with properties that have only a single 
+accessor.
+
+These are solvable but do complicate the feature a bit.
 
 ## Required reading
 https://github.com/dotnet/csharplang/blob/master/proposals/recordsv2.md
