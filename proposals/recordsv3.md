@@ -302,7 +302,8 @@ The `With` implementation for `struct record` definitions will always be the
 following for a record of type `Record`.
 
 ```cs
-public Record With => this;
+[ConstrutorMethod]
+public Record With() => this;
 ```
 
 This simply and efficiently achieves the memberwise clone operation.
@@ -359,6 +360,7 @@ be used to drive `with` expressions on `class` types:
 interface IRecord<T>
   where T : class
 {
+    [ConstrutorMethod]
     T With();
 }
 ```
@@ -414,12 +416,14 @@ record class SpecializedPerson(int X) : Person;
 class Person
 {
     // Some members ommitted 
+    [ConstrutorMethod]
     public virtual Person With() => new Person(this);
 }
 
 class SpecializedPerson : Person
 {
     // Some members ommitted 
+    [ConstrutorMethod]
     public override Person With() => new SpecializedPerson(this);
 }
 ```
