@@ -262,6 +262,9 @@ operation. Such validation already ran for the initial object construction and
 running again would be redundant. Validation which should occur for every 
 constructed instance should be done in a validator instead.
 
+The field by field copy will also include any custom fields defined by the 
+developer. This is necessary to have a true memberwise clone operation.
+
 The implementation of the `With` method is now a trivial call to the copy 
 constructor. 
 
@@ -274,6 +277,8 @@ class Point
 {
     // Other members omitted
     protected Point(Point other) { ... }
+
+    [ConstrutorMethod]
     public virtual Point With() => new Point(this);
 }
 
@@ -284,9 +289,13 @@ class Point3D : Point
         // Memberwise copy 
     }
 
+    [ConstrutorMethod]
     public overrides Point3D With() => new Point3D(this);
 }
 ```
+
+Restrictions:
+- It will be an error if the developer defines a copy constructor
 
 ### With implementation for structs
 The `With` implementation for `struct record` definitions will always be the 
@@ -342,8 +351,95 @@ Another potentional extension is to allow `unsafe` to violate normal
 `[ConstructorMethod]` rules here. After all violating these rules is nominally 
 an IL safety violation so using `unsafe` as an escape is a sensible plan.
 
-### No covariant returns
-This gets even better with covariant returns
+### No covariant returns option 1
+In the case covariant returns are not available the following interface will
+be used to drive `with` expressions on `class` types:
+
+```cs
+interface IRecord<T>
+  where T : class
+{
+    T With();
+}
+```
+
+The code generation for a record type will include an explicit implementation
+of `IRecord<T>` for the current type and all base types except for `object`. 
+The implementation of the explicitly implemented `With` methods will all be 
+the same as the covariant version:
+
+```cs
+Point3D IRecord<Point3D>.With() => new Point3D(this);
+Point IRecord<Point>.With() => new Point3D(this);
+```
+
+In the case of a `sealed` record definition or a `record struct` there will also
+be a non-virtual `With` method emitted for the current type.
+
+```cs
+sealed record class Point4D(int X, int Y, int Z, int Time) : Point3D;
+
+// Generates
+
+sealed class Point4D : Point3D, IRecord<Point4D>, IRecord<Point3D>, IRecord<Point> {
+    // IRecord implementations omittted
+
+    [ConstrutorMethod]
+    public Point4D With() => new Point4D(this);
+
+}
+```
+
+The `with` expression will be changed to have a two phase lookup, similar to 
+what `foreach` does today. 
+
+- Look for a parameterless `With` method which has a return type matching the 
+declaring type. 
+- Look for an implementation of `IRecord<T>` where `T` is the static type of
+the expression.
+- Error
+
+### No covariant returns option 2
+In the case covariant returns are not available then the `With` method will 
+always be typed to have the initial return type. Every derived record will 
+override the `With` method but leave the return type unchanged. The `with` call
+site will instead insert a cast to the most derived type. 
+
+```cs
+record class Person; 
+record class SpecializedPerson(int X) : Person;
+
+// Generates
+
+class Person
+{
+    // Some members ommitted 
+    public virtual Person With() => new Person(this);
+}
+
+class SpecializedPerson : Person
+{
+    // Some members ommitted 
+    public override Person With() => new SpecializedPerson(this);
+}
+```
+
+The `with` generation be as follows
+
+```cs
+var r = new SpecializedPerson(42);
+r = r with { X = 13 };
+
+// Generates
+var r = new SpecializedPerson(42);
+var <>temp = (SpecializedPerson)r.With();
+<>temp.X = 13;
+r = <>temp;
+```
+
+This code generation is certainly less than ideal given it's not type safe. 
+However it provides a smoot transition to covariant returns when that feature 
+becomes available from the runtime
 
 ### Use properties, not underlying fields
 
