@@ -9,13 +9,13 @@ used to include type factory methods in addition to constructors.
 Records need to support initializer style expressions in scenarios other than
 standard object construction to support `with` expressions. This though is 
 simply adding a special property to a specific named method in a type. Records
-though are not alone in wanting to denote methods as being used exclusivel for
+though are not alone in wanting to denote methods as being used exclusively for
 construction. Factory methods serve the same purpose in .NET and are common
 throughout our framework.
 
 The ability to mark methods as being used exclusively for creation should 
 become a standalone feature. Developers will be able to mark members which 
-exist soley to create objects with `[ConstructorMethod]` and the language will
+exist soley to create objects with `[Factory]` and the language will
 give such methods the same flexibility as object constructors. That means 
 those methods can now be used in combination with object and collection 
 initializers.
@@ -69,15 +69,19 @@ var s = Student.Create()
 
 This does place some restrictions on the type of expressions that can be 
 returned from a member that contains the `Factory` attribute. Specifically
-the `return` expression must be either a `new` expression, a method / property
-invocation which is marked with `Factory`, `default` or `null`.
+the `return` expression must be either a `new` expression, `with` expression,
+a method / property invocation which is marked with `Factory`, a `struct` value
+or `null`.
 
 ```cs
 class StudentFactory
 {
     // Okay: new expression
     [Factory]
-    public Student Create1() => new Student(); 
+    public Student Create1() => new Student() 
+    {
+        FirstName = "Jared",
+    };
 
     // Okay: returning another Factory method
     [Factory]
@@ -123,8 +127,12 @@ class Derived2 : Base
 ```
 
 Restrictions:
-- The return expression in a `[Factory]` method must be `new`, a call to a
-member annotated with `[Factory]`, `default` or `null`.
+- The return expression in a `[Factory]` method must be
+    - `new` expression including object / collection initializers
+    - Call to a member annotated with `[Factory]`
+    - A `struct` value
+    - A ternary or collascing expression where both branches meet the above
+    requirements
 - All overrides or `interface` implementations must match the original member
 with respect to having the `[Factory]` attribute.
 
