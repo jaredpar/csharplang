@@ -31,8 +31,8 @@ public class Widget
 
 public static class WidgetFactory
 {
-    [ConstructorMethod]
-    public static Create() => new Widget();
+    [Factory]
+    public static Widget Create() => new Widget();
 }
 
 var w = WidgetFactory.Create()
@@ -42,13 +42,145 @@ var w = WidgetFactory.Create()
 }
 ```
 
-Members annotated with `[ConstructorMethod]` have the following restrictions:
-- Cannot be a `void` returning method
-- The return expression must be a `new` object expression, a member invocation 
-where the member is marked as `[ConstructorMethod]`, `null` or `default`.
-
 ## Detailed Design
+
+### Factory methods
+Methods are properties annotated with `FactoryAttribute` will be treated like
+constructors invocations for the purpose of using object and collection
+initializer expressions on the result. This includes the ability to invoke
+`init` only property accessors during initialization:
+
+```cs
+class Student
+{
+    public string FirstName { get; init; }
+    public string LastName { get; init; }
+
+    [Factory]
+    public static Student Create() => new Student();
+}
+
+var s = Student.Create()
+{
+    FirstName = "Jared",
+    LastName = "Parsons",
+};
+```
+
+This does place some restrictions on the type of expressions that can be 
+returned from a member that contains the `Factory` attribute. Specifically
+the `return` expression must be either a `new` expression, a method / property
+invocation which is marked with `Factory`, `default` or `null`.
+
+```cs
+class StudentFactory
+{
+    // Okay: new expression
+    [Factory]
+    public Student Create1() => new Student(); 
+
+    // Okay: returning another Factory method
+    [Factory]
+    public Student Create2() => Create1();
+
+    [Factory]
+    public Student Create3() => default;
+
+    // Error: Not a valid return
+    [Factory]
+    public Student Create4()
+    {
+        var s = new Student();
+        return s;
+    }
+}
+```
+
+When `Factory` is used on a `virtual` member then all overrides must also be
+annotated with `Factory`. Likewise a `Factory` method cannot `override` a 
+non-Factory method. The matching of `Factory` also applies to interface
+implementations.
+
+```cs
+abstract class Base
+{
+    [Factory]
+    public abstract Widget Create();
+}
+
+class Derived1 : Base
+{
+    // Okay
+    [Factory]
+    public override Widget Create() => new Widget();
+}
+
+class Derived2 : Base
+{
+    // Error: The override Create does not contain a `Factory` attribute
+    public override Widget Create() => new Widget();
+}
+```
+
+Restrictions:
+- The return expression in a `[Factory]` method must be `new`, a call to a
+member annotated with `[Factory]`, `default` or `null`.
+- All overrides or `interface` implementations must match the original member
+with respect to having the `[Factory]` attribute.
+
+### Metadata Encoding
+The `FactoryAttribute` will be defined as follows:
+
+```cs
+namespace System.Runtime.CompilerServices
+{
+    [AttributeUsage(AttributeTargets.Method | AttributeTargets.Property)]
+    public sealed class FactoryAttribute : Attribute
+    {
+
+    }
+}
+```
+
+The compiler will also emit a modreq of the `IsFactory` type on virtual members
+in metadata: 
+
+```cs
+namespace System.Runtime.CompilerServices
+{
+    public sealed class IsFactory
+    {
+
+    }
+}
+```
+
+The justification for emitting a modreq here is that it's desirable for changing
+a method to add or remove `[Factory]` results in a binary breaking change to
+the member. 
 
 ## Questions
 
+### Should null be a valid return
+A factory method is really nothing more than a named constructor. Given that 
+constructors can never return `null` why should the language allow for them
+in this case?
+
+This is certainly a logical argument to make. The problem is that until we have 
+IL verification rules in place it's really hard to enforce. 
+
+### Keyword vs. attribute
+Syntax debate ... fight!
+
 ## Considerations 
+
+### IL Verification
+This needs to be rationalized with the IL verification rules of the init
+proposal
+
+### Validators
+As the validator design comes online we'll need to consider how they interact
+with `[Factory]` methods. 
+
+
+
