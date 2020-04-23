@@ -9,16 +9,115 @@ improvements.
 
 ## Motivation
 
+* implicit rules have weaknesses
+* `out` is assumed to escape even if it doesn't
+* The rules are based on the declaration because the compiler can't peek into 
+method bodies
+
 ## Detailed Design 
 
-### EscapesThis and DoesNotEscape
+### Allow lifetime annotations
+The rules for `ref struct` safety are defined in the 
+[span-safety document](https://github.com/dotnet/csharplang/blob/master/proposals/csharp-7.2/span-safety.md). 
+These rules implicitly associate lifetime values to parameters based on their 
+declaration:
 
-### Expanding ref safe to escape
+- `this` cannot escape as `ref` 
+- `ref`, `out` or `in` parameters escape as `ref`
+- All other parameters cannot escape as `ref`
 
-This is about allowing a `struct` to return a `ref` to it's field in a limited 
-set of circumstances.
+The language will provide two attributes that allow developers to be explicit
+about the lifetime of `this` and `ref`, `out` and `in` parameters. This will 
+give the method implementations and uses significantly more flexibility in 
+their use cases.
 
-Rules: https://github.com/dotnet/csharplang/blob/master/proposals/csharp-7.2/span-safety.md
+The first is `[EscapesRefThis]`. This annotation when placed on a property or
+method of a `ref struct` allows for `this` or any fields on `this` to escape
+as `ref` from the member. This will allow for `ref` returning members that don't
+require heap allocations.
+
+```cs
+ref struct FrugalList<T>
+{
+    private T _item0;
+    private T _item1;
+    private T _item2;
+
+    public int Count = 3;
+
+    [EscapesRefThis]
+    public ref T this[int index]
+    {
+        get
+        {
+            switch (index)
+            {
+                case 0: return ref _item1;
+                case 1: return ref _item2;
+                case 1: return ref _item3;
+                default: throw null;
+            }
+        }
+    }
+}
+```
+
+These rules explicitly allow for returning transitive fields in addition to 
+normal fields.
+
+```cs
+ref struct ListWithDefault<T>
+{
+    private FrugalList<T> _list;
+    private T _default;
+
+    [EscapesRefThis]
+    public ref T this[int index]
+    {
+        get
+        {
+            if (index >= _list.Count)
+            {
+                return ref _default;
+            }
+
+            return ref _list[index];
+        }
+    }
+}
+```
+
+Accordingly the following rules around `ref struct` safety would need to be 
+updated:
+
+- The lifetime of `this` would be *ref-safe-to-escape* for the entire method
+in the presence of this attribute.
+- When calling a member marked `[EscapesRefThis]` the lifetime of `this` must
+be considered when calculating the lifetime of a `ref` return value.
+
+Further a member which was marked as `[EscapesRefThis]` would not be eligible
+to implement `interface` members. This would hide the lifetime nature of the 
+member at the `interface` call site and would lead to incorrect lifetime 
+calculations.
+
+The second is `[DoesNotRefEscape]`. This annotation when placed on an `ref`, 
+`out` or `in` parameter prevents it from escaping as `ref` from the method. This
+means the parameters won't be included in the lifetime calculation for `ref`
+returns. Nor will be included when calculating lifetime for `Span<T>` 
+
+BLAH
+Got my tongue tied here. The issue isn't just about `ref` escape. It's about 
+when there is at least one `ref struct` passed by `ref` and any other
+`ref struct` input (by ref or not by ref)
+
+This is going to be hard to write without putting people to sleep
+BLAH
+
+*temporary life times need to be maintained for returns*
+
+Restrictions:
+- A method marked as `[EscapesRefThis]` can never implement an `interface`
+method
 
 ### Safe fixed size buffers
 
@@ -48,7 +147,7 @@ https://github.com/dotnet/csharplang/issues/992#issuecomment-357045213
 ### ref struct interfaces
 
 Detailed restrictions
-* 
+
 
 ## Considerations
 
@@ -75,25 +174,27 @@ that it would be a path to allow for a `ref struct` to be boxed. Consider the
 following example:
 
 ```csharp
-interface IBoxer {
-    void Go() {
+interface IBoxer 
+{
+    void Go()
+    {
         object o = this;
         Console.WriteLine(o.ToString());
     }
 }
 
-ref struct S : IBoxer {
+ref struct S : IBoxer { }
 
-}
-
-class Util {
+class Util
+{
     void Use<T>(T box)
-        where T : ref struct, IBoxer {
-
+        where T : ref struct, IBoxer
+    {
         box.Go();
     }
 
-    void SneakyBox() {
+    void SneakyBox()
+    {
         // Will box S through IBoxer.Go
         Use<S>(default);
     }
