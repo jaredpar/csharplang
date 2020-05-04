@@ -119,6 +119,9 @@ Restrictions:
 - A method marked as `[EscapesRefThis]` can never implement an `interface`
 method
 
+**NEED a way to mark a return of a method as "definitelyp stack alloced **
+https://github.com/dotnet/csharplang/issues/1130
+
 ### Safe fixed size buffers
 
 ### ref fields
@@ -236,6 +239,7 @@ that we'd eventually have say `IDisposable` and `IRefDisposable`.
 ## Related Information
 ### Issues
 
+- https://github.com/dotnet/csharplang/issues/1130
 - https://github.com/dotnet/csharplang/issues/1147
 - https://github.com/dotnet/csharplang/issues/992
 - https://github.com/dotnet/csharplang/issues/1314
