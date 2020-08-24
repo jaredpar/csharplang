@@ -126,10 +126,18 @@ https://github.com/dotnet/csharplang/issues/1130
 
 ### ref fields
 
+Jan: 
+
 My preference would be to emit them as ELEMENT_TYPE_BYREF, no different from
 how we emit ref locals or ref arguments.
  
 For example, “ref int” would be emitted as “ELEMENT_TYPE_BYREF ELEMENT_TYPE_I4”.
+
+Can check them for null using the Unsafe APIs described here.
+
+https://github.com/dotnet/runtime/pull/40008
+
+This means we can keep a `ref struct` with a `ref` field as defaultable. 
 
 ### Length one Span<T>
 
