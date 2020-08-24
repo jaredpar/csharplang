@@ -139,6 +139,23 @@ https://github.com/dotnet/runtime/pull/40008
 
 This means we can keep a `ref struct` with a `ref` field as defaultable. 
 
+The problem we need to work around is that the span safety rules essentially 
+think that the following can't capture:
+
+```
+ref struct Example
+{
+    ref int field;
+
+    Example(ref int field)
+}
+```
+
+Even though the parameter `field` is ref safe to escape outside the constructor
+the `this` parameter is not. That is an explicit rule. Hence this constructor
+cannot capture `field` as a `ref`. Can't do this implicitly either cause that would
+be a breaking change ... 
+
 ### Length one Span<T>
 
 This is about allowing the following:
