@@ -9,7 +9,8 @@ improvements.
 
 ## Motivation
 
-* implicit rules have weaknesses
+* Implicit escape safety rules are effective for majority of cases but low level 
+code frequently hits the friction points they create1
 * `out` is assumed to escape even if it doesn't
 * The rules are based on the declaration because the compiler can't peek into 
 method bodies
@@ -122,7 +123,24 @@ method
 https://github.com/dotnet/csharplang/issues/1130
 
 ### ref fields
-Developers can declare `ref` fields inside of `ref struct`:
+Developers can declare `ref` fields inside of `ref struct`. This can be useful
+for example when encapsulating large mutable `struct` instances. 
+
+```cs
+ref struct Container
+{
+    ref Vector4 _field1;
+    ref Vector4 _filed2;
+
+    public Container(ref Vector4 p1, ref Vector4 p2)
+    {
+        ref _field1 = ref p1;
+        ref _field2 = ref p2;
+    }
+}
+```
+
+
 
 ```cs
 ref struct StackLinkedListNode<T>
