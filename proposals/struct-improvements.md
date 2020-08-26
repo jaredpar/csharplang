@@ -16,10 +16,10 @@ method bodies
 
 ## Detailed Design 
 
-### Allow lifetime annotations
+### Provide escape annotations
 The rules for `ref struct` safety are defined in the 
 [span-safety document](https://github.com/dotnet/csharplang/blob/master/proposals/csharp-7.2/span-safety.md). 
-These rules implicitly associate lifetime values to parameters based on their 
+These rules implicitly associate escape scopes to parameters based on their 
 declaration:
 
 - `this` cannot escape as `ref` 
@@ -113,18 +113,59 @@ when there is at least one `ref struct` passed by `ref` and any other
 This is going to be hard to write without putting people to sleep
 BLAH
 
-*temporary life times need to be maintained for returns*
-
 Restrictions:
 - A method marked as `[EscapesRefThis]` can never implement an `interface`
 method
 
-**NEED a way to mark a return of a method as "definitelyp stack alloced **
+**temporary life times need to be maintained for returns**
+**NEED a way to mark a return of a method as "definitely stack allocated**
 https://github.com/dotnet/csharplang/issues/1130
 
-### Safe fixed size buffers
-
 ### ref fields
+Developers can declare `ref` fields inside of `ref struct`:
+
+```cs
+ref struct StackLinkedListNode<T>
+{
+    T _value;
+    ref StackLinkedListNode<T> _next;
+
+    public T Value => _value;
+
+    public bool HasNext => !Unsafe.IsNullRef(ref _next);
+
+    [EscapesRefThis]
+    public ref StackLinkedListNode<T> Next 
+    {
+        get
+        {
+            if (!HasNext)
+            {
+                throw new InvalidOperationException("No next node");
+            }
+
+            return ref _next;
+        }
+    }
+
+    public StackLinkedListNode(T value)
+    {
+        _value = value;
+    }
+
+    public StackLinkedListNode(T value, ref StackLinkedListNode<T> next)
+    {
+        _value = value;
+        ref _next = ref next;
+    }
+}
+```
+
+Restrictions:
+- A `ref` field can only be declared inside of a `ref struct` 
+- A `ref` field cannot be static
+- A `ref` field can only be assigned `ref` values which are as 
+*ref-safe-to-escape* as the container of the `ref` field.
 
 Jan: 
 
@@ -155,6 +196,14 @@ Even though the parameter `field` is ref safe to escape outside the constructor
 the `this` parameter is not. That is an explicit rule. Hence this constructor
 cannot capture `field` as a `ref`. Can't do this implicitly either cause that would
 be a breaking change ... 
+
+Actually this is not a breaking change. We can say that ctors of `ref struct` 
+which contain a `ref` field and have a `ref` parameter are downward facing. That
+is the default. The type author can work around this by marking the parameter
+as `[DoesNotRefEscape]`. This is back compat because `ref` fields are new hence
+no one can hit this yet.
+
+### Safe fixed size buffers
 
 ### Length one Span<T>
 
@@ -273,3 +322,41 @@ that we'd eventually have say `IDisposable` and `IRefDisposable`.
 ### Proposals
 
 - https://github.com/dotnet/csharplang/blob/725763343ad44a9251b03814e6897d87fe553769/proposals/fixed-sized-buffers.md
+
+#### Notes to delete
+Jan: 
+
+My preference would be to emit them as ELEMENT_TYPE_BYREF, no different from
+how we emit ref locals or ref arguments.
+ 
+For example, “ref int” would be emitted as “ELEMENT_TYPE_BYREF ELEMENT_TYPE_I4”.
+
+Can check them for null using the Unsafe APIs described here.
+
+https://github.com/dotnet/runtime/pull/40008
+
+This means we can keep a `ref struct` with a `ref` field as defaultable. 
+
+The problem we need to work around is that the span safety rules essentially 
+think that the following can't capture:
+
+```
+ref struct Example
+{
+    ref int field;
+
+    Example(ref int field)
+}
+```
+
+Even though the parameter `field` is ref safe to escape outside the constructor
+the `this` parameter is not. That is an explicit rule. Hence this constructor
+cannot capture `field` as a `ref`. Can't do this implicitly either cause that would
+be a breaking change ... 
+
+Actually this is not a breaking change. We can say that ctors of `ref struct` 
+which contain a `ref` field and have a `ref` parameter are downward facing. That
+is the default. The type author can work around this by marking the parameter
+as `[DoesNotRefEscape]`. This is back compat because `ref` fields are new hence
+no one can hit this yet.
+
