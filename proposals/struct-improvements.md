@@ -9,6 +9,10 @@ improvements.
 
 ## Motivation
 
+* The lack of `ref` fields mean that high performance `struct` innovation is 
+limited to the dotnet/runtime repository where they can take advantage of the 
+`ByReference<T>` type (which effectively are `ref` fields). It also means such
+innovation in the runtime lacks necessary compiler safety in a number of cases.
 * Implicit escape safety rules are effective for majority of cases but low level 
 code frequently hits the friction points they create1
 * `out` is assumed to escape even if it doesn't
@@ -16,8 +20,178 @@ code frequently hits the friction points they create1
 method bodies
 
 ## Detailed Design 
+The rules for `ref struct` safety are defined in the 
+[span-safety document](https://github.com/dotnet/csharplang/blob/master/proposals/csharp-7.2/span-safety.md). 
+This document will describe the proposed changes to this document as a result of
+this design. Once accepted as an approved feature these changes will be
+incorporated into that document.
+
+### Provide ref fields
+The language will allow developers to declare `ref` fields inside of a 
+`ref struct`. This can be useful for example when encapsulating large 
+mutable `struct` instances or defining new high performance types like `Span<T>`
+in libraries besides the runtime.
+
+The challenging part about allowing `ref` field declarations comes in defining
+the rules such that `Span<T>` can be defined using a `ref` field without 
+breaking compatibility with existing code. To understand this lets first
+consider the likely changes to `Span<T>` once `ref` fields are supported.
+
+```cs
+// This is the eventual definition of Span<T> once we add ref fields into the
+// language
+struct Span<T>
+{
+    ref T _field;
+    int _length;
+
+    // This constructor does not exist today however it is likely to be added as
+    // a part of changing Span<T> to have ref fields. It is a convenient, and
+    // safe, way to create a length one span over a stack value that today 
+    // requires unsafe code.
+    public Span(ref T value)
+    {
+        ref _field = ref value;
+        _length = 1;
+    }
+}
+```
+
+Given this definition there are two related scenarios, by the current 
+rules, that we need to account for in our design. Particularly we need to ensure
+that we don't reduce the *safe-to-escape* scopes of existing method signatures. 
+
+The first scenario to consider is the existing one of a method having `ref` 
+parameters and returning a `Span<T>` value.
+
+```cs
+Span<T> ConstructorLikeMethod(ref T value) => ... 
+```
+
+The *safe-to-escape* of the return value of `ConstructorLikeMethod` is the 
+enclosing method. This is irrespective of the arguments used to invoke the 
+method. That is because the *safe-to-escape* of the return is the minimum of 
+the *safe-to-escape* of the arguments and since none of them are `ref struct` 
+it is implicitly safe to return outside the enclosing method.
+
+The second scenario to consider is how to define our safety rules for the 
+newly added constructor. These need to specifically take into account that 
+this newly added constructor could be used as the implementation detail of 
+the above `ConstructorLikeMethod`
+
+```cs
+// This should be illegal
+Span<T> ConstructorLikeMethod(ref T value) => new Span<T>(ref value);
+```
+
+The rules specifically need to ensure such code does not compile because it 
+would represent a back compat break. Prior to the introduction of `ref` fields
+all calls to `ConstructorLikeMethod` had a return which was *safe-to-escape* to
+the enclosing method. Clearly this can no longer be true if it is implemented
+by calling our newly defined `Span<T>` constructor.
+
+```cs
+Span<int> Example()
+{
+    int local = 0;
+    return ConstructorLikeMethod(ref local);
+}
+```
+
+This code is completely legal today and **must** remain legal. Hence the 
+language must ensure the rules for the constructor do not allow it to be used 
+as an implementation detail of methods like `ConstructorLikeMethod`.
+
+This tension between allowing constructors such as `Span(ref T field)` and 
+ensuring compatibility with constructor like `ref struct` returning methods is 
+a key pivot point in the design of `ref` fields.
+
+To do this we will change the escape rules for a constructor on a `ref struct` 
+that directly contains a `ref` field as follows:
+- If the constructor contains any `ref struct` parameters then the 
+*safe-to-escape* of the return will be the current method scope
+- If the constructor contains any `in / out / ref` parameters that do not refer
+to reference types then the *safe-to-escape* of the return will be the current
+method scope.
+- Else the *safe-to-escape* will be the enclosing method scope
+
+The limiting of this rule to `ref struct` that directly contain a `ref field` 
+is an important compatibility concern. Consider that the majority of `ref struct`
+defined today indirectly contain `Span<T>` references. That mean by extension
+they will indirectly contain `ref` fields in the future. Hence it's important
+to ensure constructors like the following maintain their current lifetime 
+rules. 
+
+```cs
+ref struct Example
+{
+    LargeStruct _largeStruct;
+    Span<int> _span;
+
+    public Example(in LargeStruct largeStruct, Span<int> span)
+    {
+        _largeStruct = largeStruct;
+        _span = span;
+    }
+}
+```
+
+The rules for assignment of need to be adjusted when the lvalue is a `ref field`
+and the assignment is occurring by reference. Given an assignment from an
+(rvalue) expression E1 which has a *ref-safe-to-escape* scope S1 to a `ref` 
+field expression E2 with a *safe-to-escape* scope S2, it is an error if S2 
+is larger than S1. 
+
+A `ref` field will be emitted into metadata using the `ELEMENT_TYPE_BYREF` 
+signature. This is no different than how we emit `ref` locals or `ref` 
+arguments. For example `ref int _field` will be emitted as
+`ELEMENT_TYPE_BYREF ELEMENT_TYPE_I4`. This will require us to update ECMA335 
+to allow this entry but this should be rather straight forward.
+
+Developers can continue to initialize a `ref struct` with a `ref` field using 
+the `default` expression in which case all declared `ref` fields will have the 
+value `null`. Any attempt to use such fields will result in a
+`NullReferenceException` being thrown.
+
+```cs
+struct S1 
+{
+    public ref int Value;
+}
+
+S1 local = default;
+local.Value.ToString(); // throws NullReferenceException
+```
+
+While the C# language pretends that a `ref` cannot be `null` this is legal at the
+runtime level and has well defined semantics. Developers who introduce `ref` 
+fields into their types need to be aware of this possibility and can use the 
+following [runtime helpers](https://github.com/dotnet/runtime/pull/40008) to 
+check for `null` in the appropriate cases.
+
+```cs
+struct S1 
+{
+    private ref int Value;
+
+    public int GetValue()
+    {
+        if (System.Runtime.CompilerServices.Unsafe.IsNullRef(ref Value))
+        {
+            throw new InvalidOperationException(...);
+        }
+
+        return Value;
+    }
+}
+```
+
+Other Restrictions:
+- A `ref` field can only be declared inside of a `ref struct` 
+- A `ref` field cannot be declared `static`
 
 ### Provide escape annotations
+The rules `
 The rules for `ref struct` safety are defined in the 
 [span-safety document](https://github.com/dotnet/csharplang/blob/master/proposals/csharp-7.2/span-safety.md). 
 These rules implicitly associate escape scopes to parameters based on their 
@@ -121,105 +295,6 @@ method
 **temporary life times need to be maintained for returns**
 **NEED a way to mark a return of a method as "definitely stack allocated**
 https://github.com/dotnet/csharplang/issues/1130
-
-### ref fields
-Developers can declare `ref` fields inside of `ref struct`. This can be useful
-for example when encapsulating large mutable `struct` instances. 
-
-```cs
-ref struct Container
-{
-    ref Vector4 _field1;
-    ref Vector4 _filed2;
-
-    public Container(ref Vector4 p1, ref Vector4 p2)
-    {
-        ref _field1 = ref p1;
-        ref _field2 = ref p2;
-    }
-}
-```
-
-
-
-```cs
-ref struct StackLinkedListNode<T>
-{
-    T _value;
-    ref StackLinkedListNode<T> _next;
-
-    public T Value => _value;
-
-    public bool HasNext => !Unsafe.IsNullRef(ref _next);
-
-    [EscapesRefThis]
-    public ref StackLinkedListNode<T> Next 
-    {
-        get
-        {
-            if (!HasNext)
-            {
-                throw new InvalidOperationException("No next node");
-            }
-
-            return ref _next;
-        }
-    }
-
-    public StackLinkedListNode(T value)
-    {
-        _value = value;
-    }
-
-    public StackLinkedListNode(T value, ref StackLinkedListNode<T> next)
-    {
-        _value = value;
-        ref _next = ref next;
-    }
-}
-```
-
-Restrictions:
-- A `ref` field can only be declared inside of a `ref struct` 
-- A `ref` field cannot be static
-- A `ref` field can only be assigned `ref` values which are as 
-*ref-safe-to-escape* as the container of the `ref` field.
-
-Jan: 
-
-My preference would be to emit them as ELEMENT_TYPE_BYREF, no different from
-how we emit ref locals or ref arguments.
- 
-For example, “ref int” would be emitted as “ELEMENT_TYPE_BYREF ELEMENT_TYPE_I4”.
-
-Can check them for null using the Unsafe APIs described here.
-
-https://github.com/dotnet/runtime/pull/40008
-
-This means we can keep a `ref struct` with a `ref` field as defaultable. 
-
-The problem we need to work around is that the span safety rules essentially 
-think that the following can't capture:
-
-```
-ref struct Example
-{
-    ref int field;
-
-    Example(ref int field)
-}
-```
-
-Even though the parameter `field` is ref safe to escape outside the constructor
-the `this` parameter is not. That is an explicit rule. Hence this constructor
-cannot capture `field` as a `ref`. Can't do this implicitly either cause that would
-be a breaking change ... 
-
-Actually this is not a breaking change. We can say that ctors of `ref struct` 
-which contain a `ref` field and have a `ref` parameter are downward facing. That
-is the default. The type author can work around this by marking the parameter
-as `[DoesNotRefEscape]`. This is back compat because `ref` fields are new hence
-no one can hit this yet.
 
 ### Safe fixed size buffers
 
@@ -340,6 +415,97 @@ that we'd eventually have say `IDisposable` and `IRefDisposable`.
 ### Proposals
 
 - https://github.com/dotnet/csharplang/blob/725763343ad44a9251b03814e6897d87fe553769/proposals/fixed-sized-buffers.md
+
+
+#### Considerations
+
+Need to solve the difference between the following methods.
+
+``` C#
+
+// This is the logical, and eventual, definition of Span<T> once we add ref
+// fields into the language
+struct Span<T>
+{
+    ref T _field;
+    int _length;
+
+    // This is a ctor which is illegal today but will be legal, and likely added,
+    // once we add ref fields into the language
+    public Span(ref T value)
+    {
+        _field = ref value;
+        _length = 1;
+    }
+}
+
+class Example
+{
+    // This is a can exist today and the returned Span<T> can never escape the 
+    // parameter by ref.
+    Span<T> Create(ref T p) { throw null; }
+
+    SmallSpan<T> MethodFactory()
+    {
+        T value;
+
+        // This local must be "safe-to-escape" as that is a legal use of Span 
+        // today
+        // https://sharplab.io/#v2:EYLgtghgzgLgpgJwD4AEBMBGAsAKFygZgAJ0iBRADwjAAcAbOIgb1yLaIGUaIA7AHgAqAPiIBhBHAjxBQgBQSAZkQFEAbhDoBXOAEoiAXhE84Ad07d+w2cZMBtALrM1G7UQC+OgNy5W7X2y5ePgBLHhgRAFUoCABzOEpqejhZHX9mNPYiUJgiOgB7AGMNAyIAFjRvHEzMwP5skSgLEvFJeHk4JXyiui8M9hQAdiJG3krMt1w3IA=
+        var span1 = Create(ref value);
+        return span1; // This is Okay
+    }
+
+    SmallSpan<T> Constructor()
+    {
+        T value;
+
+        // This must *NOT* be "safe-to-escape" as it is possible for the ctor of
+        // Span<T> to return the parameter by ref once it has a ref field.
+        var span1 = new Span(ref value);
+        return span1; // This must be an error
+    }
+}
+```
+
+```cs
+ref struct StackLinkedListNode<T>
+{
+    T _value;
+    ref StackLinkedListNode<T> _next;
+
+    public T Value => _value;
+
+    public bool HasNext => !Unsafe.IsNullRef(ref _next);
+
+    [EscapesRefThis]
+    public ref StackLinkedListNode<T> Next 
+    {
+        get
+        {
+            if (!HasNext)
+            {
+                throw new InvalidOperationException("No next node");
+            }
+
+            return ref _next;
+        }
+    }
+
+    public StackLinkedListNode(T value)
+    {
+        _value = value;
+    }
+
+    public StackLinkedListNode(T value, ref StackLinkedListNode<T> next)
+    {
+        _value = value;
+        ref _next = ref next;
+    }
+}
+```
+
+
 
 #### Notes to delete
 Jan: 
