@@ -282,7 +282,7 @@ these parameters will not factor into the *ref-safe-to-escape* rules for method
 invocation. 
 
 This is helpful to developer as it provides an escape valve when developers 
-run into the [method arguments mutch match](https://github.com/dotnet/csharplang/blob/master/proposals/csharp-7.2/span-safety.md#method-arguments-must-match)
+run into the [method arguments must match](https://github.com/dotnet/csharplang/blob/master/proposals/csharp-7.2/span-safety.md#method-arguments-must-match)
 lifetime restriction. These attributes let the developer specify that certain
 parameters do not escape which means they don't need to be considered for that
 calculation.
