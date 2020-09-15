@@ -68,8 +68,8 @@ parameters and returning a `Span<T>` value.
 Span<T> ConstructorLikeMethod(ref T value) => ... 
 ```
 
-The *safe-to-escape* of the return value of `ConstructorLikeMethod` is the 
-enclosing method. This is irrespective of the arguments used to invoke the 
+The *safe-to-escape* of the return value of `ConstructorLikeMethod` is outside 
+the enclosing method. This is irrespective of the arguments used to invoke the 
 method. That is because the *safe-to-escape* of the return is the minimum of 
 the *safe-to-escape* of the arguments and since none of them are `ref struct` 
 it is implicitly safe to return outside the enclosing method.
@@ -87,8 +87,8 @@ Span<T> ConstructorLikeMethod(ref T value) => new Span<T>(ref value);
 The rules specifically need to ensure such code does not compile because it 
 would represent a back compat break. Prior to the introduction of `ref` fields
 all calls to `ConstructorLikeMethod` had a return which was *safe-to-escape* to
-the enclosing method. Clearly this can no longer be true if it is implemented
-by calling our newly defined `Span<T>` constructor.
+outside the enclosing method. Clearly this can no longer be true if it is 
+implemented by calling our newly defined `Span<T>` constructor.
 
 ```cs
 Span<int> Example()
@@ -113,7 +113,7 @@ that directly contains a `ref` field as follows:
 - If the constructor contains any `in / out / ref` parameters that do not refer
 to reference types then the *safe-to-escape* of the return will be the current
 method scope.
-- Else the *safe-to-escape* will be the enclosing method scope
+- Else the *safe-to-escape* will be the outside the enclosing method
 
 The limiting of this rule to `ref struct` that directly contain a `ref field` 
 is an important compatibility concern. Consider that the majority of `ref struct`
@@ -186,30 +186,40 @@ struct S1
 }
 ```
 
-Other Restrictions:
+Misc Notes:
 - A `ref` field can only be declared inside of a `ref struct` 
 - A `ref` field cannot be declared `static`
 
-### Provide escape annotations
-The rules `
-The rules for `ref struct` safety are defined in the 
-[span-safety document](https://github.com/dotnet/csharplang/blob/master/proposals/csharp-7.2/span-safety.md). 
-These rules implicitly associate escape scopes to parameters based on their 
-declaration:
+### Provide parameter escape annotations
+The rules for calculated the escape scopes of parameters are all inferred from 
+their declarations:
 
-- `this` cannot escape as `ref` 
-- `ref`, `out` or `in` parameters escape as `ref`
-- All other parameters cannot escape as `ref`
+- `this` cannot escape as `ref` which restricts it *ref-safe-to-escape* scope.
+- `ref`, `out` or `in` parameters escape as `ref` which impact the 
+*ref-safe-to-escape* of returns as well as combinations of arguments.
 
-The language will provide two attributes that allow developers to be explicit
-about the lifetime of `this` and `ref`, `out` and `in` parameters. This will 
-give the method implementations and uses significantly more flexibility in 
-their use cases.
+The defaults chosen for these escape scopes are reasonable for the majority of 
+programs. However there are many cases where the inferred escape behavior does
+not line up with the actual implementation and this creates friction for 
+developers.
 
-The first is `[EscapesRefThis]`. This annotation when placed on a property or
-method of a `ref struct` allows for `this` or any fields on `this` to escape
-as `ref` from the member. This will allow for `ref` returning members that don't
-require heap allocations.
+To remove this friction the language will provide two attributes that allow
+developers to be explicit about the lifetime of `this` and `ref`, `out` and 
+`in` parameters. These parameters are as follows:
+
+`[RefEscapes]`: when applied to an instance method, instance property or 
+instance accessor of a `ref struct` then the `this` parameter will be considered
+*ref-safe-to-escape* to outside the enclosing method.
+`[RefDoesNotEscape]`: when applied to a `ref`, `out` or `in` parameter then that
+parameter will be considered *ref-safe-to-escape* to the top level scope of the 
+enclosing method.
+
+The "Parameters" section of the span safety spec will be adjusted to include 
+these rules. 
+
+The first attribute, `[RefEscapes]`, allows for greater flexibility in 
+`ref struct` definitions as they can begin returning `ref` to their fields. That
+allows for definitions like `FrugalList<T>`:
 
 ```cs
 ref struct FrugalList<T>
@@ -220,9 +230,9 @@ ref struct FrugalList<T>
 
     public int Count = 3;
 
-    [EscapesRefThis]
     public ref T this[int index]
     {
+        [RefEscapes]
         get
         {
             switch (index)
@@ -237,8 +247,8 @@ ref struct FrugalList<T>
 }
 ```
 
-These rules explicitly allow for returning transitive fields in addition to 
-normal fields.
+This will naturally, by the existing rules in the span safety spec, allow
+for returning transitive fields in addition to direct fields.
 
 ```cs
 ref struct ListWithDefault<T>
@@ -246,9 +256,9 @@ ref struct ListWithDefault<T>
     private FrugalList<T> _list;
     private T _default;
 
-    [EscapesRefThis]
     public ref T this[int index]
     {
+        [RefEscapes]
         get
         {
             if (index >= _list.Count)
@@ -262,55 +272,44 @@ ref struct ListWithDefault<T>
 }
 ```
 
-Accordingly the following rules around `ref struct` safety would need to be 
-updated:
+Members which contain the `[RefEscapes]` attribute cannot be used to implement 
+interface members. This would hide the lifetime nature of the member at 
+the `interface` call site and would lead to incorrect lifetime calculations.
 
-- The lifetime of `this` would be *ref-safe-to-escape* for the entire method
-in the presence of this attribute.
-- When calling a member marked `[EscapesRefThis]` the lifetime of `this` must
-be considered when calculating the lifetime of a `ref` return value.
+The second attribute, `[RefDoesNotEscape]`, when placed on a `ref`, `out` or
+`in` parameter prevents it from escaping as `ref` from the method. This means 
+these parameters will not factor into the *ref-safe-to-escape* rules for method
+invocation. 
 
-Further a member which was marked as `[EscapesRefThis]` would not be eligible
-to implement `interface` members. This would hide the lifetime nature of the 
-member at the `interface` call site and would lead to incorrect lifetime 
-calculations.
+This is helpful to developer as it provides an escape valve when developers 
+run into the [method arguments mutch match](https://github.com/dotnet/csharplang/blob/master/proposals/csharp-7.2/span-safety.md#method-arguments-must-match)
+lifetime restriction. These attributes let the developer specify that certain
+parameters do not escape which means they don't need to be considered for that
+calculation.
 
-The second is `[DoesNotRefEscape]`. This annotation when placed on an `ref`, 
-`out` or `in` parameter prevents it from escaping as `ref` from the method. This
-means the parameters won't be included in the lifetime calculation for `ref`
-returns. Nor will be included when calculating lifetime for `Span<T>` 
+Together these two attributes will cause the "Parameters" section of the span
+safety doc to be updated to the following:
 
-BLAH
-Got my tongue tied here. The issue isn't just about `ref` escape. It's about 
-when there is at least one `ref struct` passed by `ref` and any other
-`ref struct` input (by ref or not by ref)
+- If the parameter is a `ref`, `out`, or `in` parameter, it is 
+*ref-safe-to-escape* outside the enclosing method unless it is attributed with
+`[RefDoesNotEscape]` in which case it is *ref-safe-to-escape* to the top-level 
+scope of the enclosing method.
+- If the parameter is the `this` parameter of a `struct` type, it is 
+*ref-safe-to-escape* to the top-level scope of the enclosing method unless the 
+method is annotated with `[RefEscapes]` in which case it is *ref-safe-to-escape*
+outside the enclosing method.
 
-This is going to be hard to write without putting people to sleep
-BLAH
+Misc Notes:
+- A member marked as `[RefEscapes]` can not implement an `interface` method.
+- The `RefEscapesAttribute` and `RefDoesNotEscapeAttribute` will be defined
+in the `System.Runtime.CompilerServices` namespace.
 
-Restrictions:
-- A method marked as `[EscapesRefThis]` can never implement an `interface`
-method
 
 **temporary life times need to be maintained for returns**
 **NEED a way to mark a return of a method as "definitely stack allocated**
 https://github.com/dotnet/csharplang/issues/1130
 
 ### Safe fixed size buffers
-
-### Length one Span<T>
-
-This is about allowing the following:
-
-```cs
-int i = 42;
-Span<int> s = ref i;
-```
-
-https://github.com/dotnet/csharplang/issues/992
-
-Consider downward facing only to fix the issues described in this comment
-https://github.com/dotnet/csharplang/issues/992#issuecomment-357045213
 
 ### ref struct constraint
 
@@ -417,7 +416,14 @@ that we'd eventually have say `IDisposable` and `IRefDisposable`.
 - https://github.com/dotnet/csharplang/blob/725763343ad44a9251b03814e6897d87fe553769/proposals/fixed-sized-buffers.md
 
 
-#### Considerations
+#### TODO before submitting
+
+
+https://github.com/dotnet/csharplang/issues/992
+
+Consider downward facing only to fix the issues described in this comment
+https://github.com/dotnet/csharplang/issues/992#issuecomment-357045213
+
 
 Need to solve the difference between the following methods.
 

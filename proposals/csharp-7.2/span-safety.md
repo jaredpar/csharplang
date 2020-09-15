@@ -6,7 +6,7 @@ The main reason for the additional safety rules when dealing with types like `Sp
  
 There are two reasons why `Span<T>` and similar types must be a stack-only types.
 
-1. `Span<T>` is semantically a struct containing a reference and a range - `(ref T data, int length)`. Regardless of actual implementation, writes to such struct would not be atomic. Concurrent "tearing" of such struct would lead to the possibility of `length` not matching the `data`, causing out-of-range accesses and type-safety violations, which ultimately could result in GC heap corruption in seemingly "safe" code.
+1. `Span<T>` is semantically a `struct` containing a reference and a range - `(ref T data, int length)`. Regardless of actual implementation, writes to such `struct` would not be atomic. Concurrent "tearing" of such `struct` would lead to the possibility of `length` not matching the `data`, causing out-of-range accesses and type-safety violations, which ultimately could result in GC heap corruption in seemingly "safe" code.
 2. Some implementations of `Span<T>` literally contain a managed pointer in one of its fields. Managed pointers are not supported as fields of heap objects and code that manages to put a managed pointer on the GC heap typically crashes at JIT time.
 
 All the above problems would be alleviated if instances of `Span<T>` are constrained to exist only on the execution stack. 
