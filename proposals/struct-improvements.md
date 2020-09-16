@@ -410,6 +410,7 @@ that we'd eventually have say `IDisposable` and `IRefDisposable`.
 - https://github.com/dotnet/csharplang/issues/992
 - https://github.com/dotnet/csharplang/issues/1314
 - https://github.com/dotnet/csharplang/issues/2208
+- https://github.com/dotnet/runtime/issues/32060
 
 ### Proposals
 
