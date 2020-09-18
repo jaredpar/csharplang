@@ -482,7 +482,48 @@ Misc Notes:
 `System.Runtime.CompilerServices` namespace.
 
 ### Safe fixed size buffers
+The language will relax the restrictions on fixed sized arrays such that the 
+can be declared in safe code and the element type can be managed or unmanaged. 
+This will make types like the following legal:
 
+```cs
+internal struct CharBuffer
+{
+    internal fixed char Data[128];
+}
+```
+
+These declarations, much like their `unsafe` counter parts, will define a 
+sequence of `N` elements in the containing type. 
+
+For each `fixed` declaration in a type where the element type is `T` the 
+language will generate a corresponding `get` only indexer method whose return
+type is `ref T`. The indexer will be annotated with the `[RefEscapes]` attribute
+as the implementation will be returning fields of the declaring type. The 
+accessibility of the member will match the accessibility on the `fixed` field.
+
+For example, the signature of the indexer for `CharBuffer.Data` will be the 
+following:
+
+```cs
+[RefEscapes]
+internal ref char <>DataIndexer(int index) => ...;
+```
+
+If the provided index is outside the declared bounds of the `fixed` array then
+an `IndexOutOfRangeException` will be thrown. In the case a constant value is 
+provided then it will be replaced with a direct reference to the appropriate 
+element. Unless the constant is outside the declared bounds in which case a 
+compile time error would occur.
+
+The backing storage for the buffer will be generated using the 
+`[InlineArray]` attribute. This is a mechanism discussed in [isuse 12320](https://github.com/dotnet/runtime/issues/12320) 
+which allows specifically for the case of efficiently declaring sequence of 
+fields of the same type.
+
+This particular issue is still under active discussion and the expectation is
+that the implementation of this feature will follow however that discussion
+goes.
 
 ### Provide parameter escape annotations
 **THIS SECTION NEEDS WORK**
@@ -569,11 +610,10 @@ Misc Notes:
 `System.Runtime.CompilerServices` namespace.
 
 ### ref struct constraint
+***THIS SECTION NEEDS WORK***
 
 ### ref struct interfaces
-
-Detailed restrictions
-
+***THIS SECTION NEEDS WORK***
 
 ## Considerations
 
@@ -673,64 +713,7 @@ that we'd eventually have say `IDisposable` and `IRefDisposable`.
 
 - https://github.com/dotnet/csharplang/blob/725763343ad44a9251b03814e6897d87fe553769/proposals/fixed-sized-buffers.md
 
-
-#### TODO before submitting
-
-
-https://github.com/dotnet/csharplang/issues/992
-
-Consider downward facing only to fix the issues described in this comment
-https://github.com/dotnet/csharplang/issues/992#issuecomment-357045213
-
-
-Need to solve the difference between the following methods.
-
-``` C#
-
-// This is the logical, and eventual, definition of Span<T> once we add ref
-// fields into the language
-struct Span<T>
-{
-    ref T _field;
-    int _length;
-
-    // This is a ctor which is illegal today but will be legal, and likely added,
-    // once we add ref fields into the language
-    public Span(ref T value)
-    {
-        _field = ref value;
-        _length = 1;
-    }
-}
-
-class Example
-{
-    // This is a can exist today and the returned Span<T> can never escape the 
-    // parameter by ref.
-    Span<T> Create(ref T p) { throw null; }
-
-    SmallSpan<T> MethodFactory()
-    {
-        T value;
-
-        // This local must be "safe-to-escape" as that is a legal use of Span 
-        // today
-        // https://sharplab.io/#v2:EYLgtghgzgLgpgJwD4AEBMBGAsAKFygZgAJ0iBRADwjAAcAbOIgb1yLaIGUaIA7AHgAqAPiIBhBHAjxBQgBQSAZkQFEAbhDoBXOAEoiAXhE84Ad07d+w2cZMBtALrM1G7UQC+OgNy5W7X2y5ePgBLHhgRAFUoCABzOEpqejhZHX9mNPYiUJgiOgB7AGMNAyIAFjRvHEzMwP5skSgLEvFJeHk4JXyiui8M9hQAdiJG3krMt1w3IA=
-        var span1 = Create(ref value);
-        return span1; // This is Okay
-    }
-
-    SmallSpan<T> Constructor()
-    {
-        T value;
-
-        // This must *NOT* be "safe-to-escape" as it is possible for the ctor of
-        // Span<T> to return the parameter by ref once it has a ref field.
-        var span1 = new Span(ref value);
-        return span1; // This must be an error
-    }
-}
-```
+### Fun Samples
 
 ```cs
 ref struct StackLinkedListNode<T>
@@ -758,6 +741,7 @@ ref struct StackLinkedListNode<T>
 
     public StackLinkedListNode(T value)
     {
+        this = default;
         _value = value;
     }
 
@@ -769,42 +753,4 @@ ref struct StackLinkedListNode<T>
 }
 ```
 
-
-
-#### Notes to delete
-Jan: 
-
-My preference would be to emit them as ELEMENT_TYPE_BYREF, no different from
-how we emit ref locals or ref arguments.
- 
-For example, “ref int” would be emitted as “ELEMENT_TYPE_BYREF ELEMENT_TYPE_I4”.
-
-Can check them for null using the Unsafe APIs described here.
-
-https://github.com/dotnet/runtime/pull/40008
-
-This means we can keep a `ref struct` with a `ref` field as defaultable. 
-
-The problem we need to work around is that the span safety rules essentially 
-think that the following can't capture:
-
-```
-ref struct Example
-{
-    ref int field;
-
-    Example(ref int field)
-}
-```
-
-Even though the parameter `field` is ref safe to escape outside the constructor
-the `this` parameter is not. That is an explicit rule. Hence this constructor
-cannot capture `field` as a `ref`. Can't do this implicitly either cause that would
-be a breaking change ... 
-
-Actually this is not a breaking change. We can say that ctors of `ref struct` 
-which contain a `ref` field and have a `ref` parameter are downward facing. That
-is the default. The type author can work around this by marking the parameter
-as `[DoesNotRefEscape]`. This is back compat because `ref` fields are new hence
-no one can hit this yet.
 
