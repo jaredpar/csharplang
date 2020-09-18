@@ -32,10 +32,18 @@ The language will allow developers to declare `ref` fields inside of a
 mutable `struct` instances or defining new high performance types like `Span<T>`
 in libraries besides the runtime.
 
-The challenging part about allowing `ref` field declarations comes in defining
-the rules such that `Span<T>` can be defined using a `ref` field without 
-breaking compatibility with existing code. To understand this lets first
-consider the likely changes to `Span<T>` once `ref` fields are supported.
+Today `ref` fields accomplished by using the `ByReference<T>` type which the 
+runtime treats effective as a `ref` field. This means though that only the 
+runtime repository can take full advantage of `ref` field like behavior and 
+all uses of it require manual verification of safety. Part of the 
+[motivation for this work](https://github.com/dotnet/runtime/issues/32060) is
+to remove `ByReference<T>` and use proper `ref` fields in all code bases.
+
+The challenging part about allowing `ref` fields declarations though comes in
+defining rules such that `Span<T>` can be defined using `ref` fields without 
+breaking compatibility with existing code. To understand the challenges here 
+let's first consider the likely changes to `Span<T>` once `ref` fields are 
+supported.
 
 ```cs
 // This is the eventual definition of Span<T> once we add ref fields into the
@@ -57,82 +65,164 @@ struct Span<T>
 }
 ```
 
-Given this definition there are two related scenarios, by the current 
-rules, that we need to account for in our design. Particularly we need to ensure
-that we don't reduce the *safe-to-escape* scopes of existing method signatures. 
+The constructor defined here presents a problem because it's return values must
+necessarily have restricted lifetimes for many inputs. Consider that if a 
+local parameter is passed by `ref` into this constructor that the returned 
+`Span<T>` must have a *safe-to-escape* scope of the local's declaration scope.
 
-The first scenario to consider is the existing one of a method having `ref` 
-parameters and returning a `Span<T>` value.
+At the same time it is legal to have methods today which take a `ref` parameter 
+and return a `Span<T>`.  
 
 ```cs
-Span<T> ConstructorLikeMethod(ref T value) => ... 
+Span<T> CreateSpan(ref T value) => ... 
 ```
-
-The *safe-to-escape* of the return value of `ConstructorLikeMethod` is outside 
-the enclosing method. This is irrespective of the arguments used to invoke the 
-method. That is because the *safe-to-escape* of the return is the minimum of 
-the *safe-to-escape* of the arguments and since none of them are `ref struct` 
+These methods have essentially the same properties as the new `Span<T>`
+constructor yet they have very different lifetime rules. The *safe-to-escape* 
+of the return value of `CreateSpan` is outside the enclosing method that invokes
+it. This is irrespective of the arguments used to invoke the method. That is 
+because the *safe-to-escape* of the return is the minimum of the 
+*safe-to-escape* of the arguments and since none of them are `ref struct` 
 it is implicitly safe to return outside the enclosing method.
 
-The second scenario to consider is how to define our safety rules for the 
-newly added constructor. These need to specifically take into account that 
-this newly added constructor could be used as the implementation detail of 
-the above `ConstructorLikeMethod`
+The rules must ensure the `Span<T>` constructor properly restricts the 
+*safe-to-escape* scope of constructed objects while ensuring calls to methods
+like `CreateSpan` remain the same. 
 
 ```cs
-// This should be illegal
-Span<T> ConstructorLikeMethod(ref T value) => new Span<T>(ref value);
-```
-
-The rules specifically need to ensure such code does not compile because it 
-would represent a back compat break. Prior to the introduction of `ref` fields
-all calls to `ConstructorLikeMethod` had a return which was *safe-to-escape* to
-outside the enclosing method. Clearly this can no longer be true if it is 
-implemented by calling our newly defined `Span<T>` constructor.
-
-```cs
-Span<int> Example()
+class C
 {
-    int local = 0;
-    return ConstructorLikeMethod(ref local);
+    Span<T> CreateSpan(ref T value) => ...;
+
+    Span<T> Examples<T>(ref T p, T[] array)
+    {
+        // Legal today, must remain legal 
+        return CreateSpan(ref p); 
+
+        // Legal today, must remain legal
+        T local = default;
+        return CreateSpan(ref local);
+
+        // Legal for any possible value that could be used as an argument
+        return CreateSpan(...);
+
+        // Legal today, must remain legal
+        return new Span<T>(array, 0, array.Length);
+
+        // Must error because allowing this would necessarily change the 
+        // *safe-to-escape* value of the return if it were allowed. This 
+        // would break compatibility
+        return new Span<T>(ref p);
+
+        // Must error because this would be returning a reference to the
+        // stack
+        return new Span<T>(ref local);
+    }
 }
 ```
 
-This code is completely legal today and **must** remain legal. Hence the 
-language must ensure the rules for the constructor do not allow it to be used 
-as an implementation detail of methods like `ConstructorLikeMethod`.
-
 This tension between allowing constructors such as `Span(ref T field)` and 
-ensuring compatibility with constructor like `ref struct` returning methods is 
-a key pivot point in the design of `ref` fields.
+ensuring compatibility with `ref struct` constructor like `CreateSpan` is a
+key pivot point in the design of `ref` fields.
 
-To do this we will change the escape rules for a constructor on a `ref struct` 
-that directly contains a `ref` field as follows:
+To do this we will change the escape rules for a constructor invocation on a 
+`ref struct` that directly contains a `ref` field as follows:
 - If the constructor contains any `ref struct` parameters then the 
-*safe-to-escape* of the return will be the current method scope
+*safe-to-escape* of the return will be the current scope
 - If the constructor contains any `in / out / ref` parameters then the 
-*safe-to-escape* of the return will be the current
-method scope.
-- Else the *safe-to-escape* will be the outside the enclosing method
+*safe-to-escape* of the return will be the current scope.
+- Else the *safe-to-escape* will be the outside the method scope
 
-**NEED TO CHANGE TO CONSTRUCTOR INVOCATION TO CATCH THE THIS CALL**
-
-***EXAMPLES**
-
-The limiting of this rule to `ref struct` that directly contain a `ref field` 
-is an important compatibility concern. Consider that the majority of `ref struct`
-defined today indirectly contain `Span<T>` references. That mean by extension
-they will indirectly contain `ref` fields in the future. Hence it's important
-to ensure constructors like the following maintain their current lifetime 
-rules. 
+Lets examine these rules in the context of samples to better understand their
+impact.
 
 ```cs
-ref struct Example
+ref struct RS
+{
+    ref int _field1;
+    ref object _field2;
+
+    public RS(object[] array) => ...;
+    public RS(ref int i) => ...;
+    public RS(ref object o) => ...;
+
+    RS CreateRS(ref i) => ...;
+
+    RS RuleExamples(ref int i, ref object o, object[] array)
+    {
+        var rs1 = new RS(ref i);
+
+        // Error by bullet 1: the safe-to-escape scope of 'rs1' is the current
+        // scope.
+        return rs1; 
+
+        var rs2 = new RS(array);
+
+        // Okay by bullet 3: the safe-to-escape scope of 'rs2' is outside the 
+        // method scope.
+        return rs2; 
+
+        int local = 42;
+
+        // Error by bullet 1: the safe-to-escape scope is the current scope
+        return new RS(ref local);
+        return new RS(ref o);
+
+        // Okay because rules for method calls have not changed.
+        return CreateRS(ref local);
+        return CreateRS(ref o);
+    }
+}
+```
+
+It is important to note that for the purposes of the rule above any use of 
+constructor chaining via `this` is considered a constructor invocation. The
+result of the chained constructor call is considered to be returning to the 
+original constructor hence *safe-to-escape* rules come into play. That is 
+important in avoiding examples like the following:
+
+```cs
+struct RS1
+{
+    ref int _field;
+    public RS1(ref int p) => ...;
+}
+
+ref struct RS2
+{
+    RS1 _field;
+    public RS2(RS1 p)
+    {
+        _field = p;
+    }
+
+    public RS2(ref int i)  
+        // Error: the *safe-to-escape* return of :this the current method scope
+        // but the 'this' parameter has a *safe-to-escape* outside the current
+        // method scope
+        : this(new RS1(ref i))
+    {
+
+    }
+}
+```
+
+The limiting of the constructor rules to just `ref struct` that directly contain
+ `ref` field is another important compatibility concern. Consider that the 
+majority of `ref struct` defined today indirectly contain `Span<T>` references. 
+That mean by extension they will indirectly contain `ref` fields once `Span<T>`
+adopts `ref` fields. Hence it's important to ensure the *safe-to-return* rules
+of constructors on these types do not change. That is why the restrictions
+must only apply to types that directly contain a `ref` field.
+
+Example of where this comes into play.
+
+```cs
+ref struct Container
 {
     LargeStruct _largeStruct;
     Span<int> _span;
 
-    public Example(in LargeStruct largeStruct, Span<int> span)
+    public Container(in LargeStruct largeStruct, Span<int> span)
     {
         _largeStruct = largeStruct;
         _span = span;
@@ -140,13 +230,68 @@ ref struct Example
 }
 ```
 
-***EXAMPLES of Indirect***
+Much like the `CreateSpan` example before the *safe-to-escape* return of the 
+`Container` constructor is not impacted by the `largeStruct` parameter. If the
+new constructor rules were applied to this type then it would break 
+compatibility with existing code. The existing rules are also sufficient for 
+existing constructors to prevent them from simulating `ref` fields by storing
+them into `Span<T>` fields.
 
-The rules for assignment of need to be adjusted when the lvalue is a `ref field`
+```cs
+ref struct RS4
+{
+    Span<int> _span;
+
+    public RS4(Span<int> span)
+    {
+        // Legal today and the rules for this constructor invocation 
+        // remain unchanged
+        _span = span;
+    }
+
+    public RS4(ref int i)
+    {
+        // Error. Bullet 1 of the new constructor rules gives this newly created
+        // Span<T> a *safe-to-escape* of the current scope. The 'this' parameter
+        // though has a *safe-to-escape* outside the current method. Hence this
+        // is illegal by assignment rules because it's assigning a smaller scope
+        // to a larger one.
+        _span = new Span(ref i);
+    }
+
+    // Legal today, must remain legal for compat. If the new constructor rules 
+    // applied to 'RS4' though this would be illegal. This is why the new 
+    // constructor rules have a restriction to directly defining a ref field
+    static RS4 CreateContainer(ref int i) => new RS4(ref i);
+}
+```
+
+The rules for assignment  need to be adjusted when the lvalue is a `ref field`
 and the assignment is occurring by reference. Given an assignment from an
-(rvalue) expression E1 which has a *ref-safe-to-escape* scope S1 to a `ref` 
+(lvalue) expression E1 which has a *ref-safe-to-escape* scope S1 to a `ref` 
 field expression E2 with a *safe-to-escape* scope S2, it is an error if S2 
-is larger than S1. 
+is larger than S1.
+
+```cs
+ref struct SmallSpan
+{
+    public ref int _field;
+
+    void Example(ref SmallSpan parameter, int )
+    {
+        int i = 0;
+
+        // Error: the *safe-to-escape* scope of 'parameter' (E2) is outside the 
+        // current method while the *ref-safe-to-escape* scope of 'i' (E1) is
+        // the current scope
+        ref parameter._field = ref i;
+
+    }
+}
+
+```
+
+
 
 **EXAMPLES OF WHY**
 
