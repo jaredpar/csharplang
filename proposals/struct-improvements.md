@@ -18,6 +18,10 @@ code frequently hits the friction points they create1
 * `out` is assumed to escape even if it doesn't
 * The rules are based on the declaration because the compiler can't peek into 
 method bodies
+* The defaults chosen for these escape scopes are reasonable for the majority of 
+programs. However there are many cases where the inferred escape behavior does
+not line up with the actual implementation and this creates friction for 
+developers.
 
 ## Detailed Design 
 The rules for `ref struct` safety are defined in the 
@@ -358,8 +362,127 @@ struct S1
 Misc Notes:
 - A `ref` field can only be declared inside of a `ref struct` 
 - A `ref` field cannot be declared `static`
+- A `ref` field can only be `ref` assigned in the constructor of the declaring
+type.
+
+### Provide struct this escape annotation
+The rules for the scope of `this` in a `struct` limit the *ref-safe-to-escape*
+scope to the current method. That means neither `this`, nor any of its fields
+can return by reference to the caller.
+
+```cs
+struct S
+{
+    int _field;
+    // Error: this, and hence _field, can't return by ref
+    public ref int Prop => ref _field;
+}
+```
+
+There is nothing inherently wrong with a `struct` escaping `this` by reference.
+Instead the justification for this rule is that it strikes a balance between the 
+usability of `struct` and `interfaces`. If a `struct` could escape `this` by 
+reference then it would significantly reduce the use of `ref` returns in 
+interfaces.
+
+```cs
+interface I1
+{
+    ref int Prop { get; }
+}
+
+struct S1 : I1
+{
+    int _field;
+    public ref int Prop => _ref field;
+
+    // When T is a struct type, like S1 this would end up returning a reference
+    // to the parameter
+    static ref int M<T>(T p) where T : I1 => ref p.Prop;
+}
+```
+
+The justification here is reasonable but it also introduces unnecessary
+friction on `struct` members that don't participate in interface invocations. 
+
+To remove this friction the language will provide the attribute `[RefEscapes]`.
+When this attribute is applied to an instance method, instance property or 
+instance accessor of a `struct` or `ref struct` then the `this` parameter will
+be considered *ref-safe-to-escape* outside the enclosing method.
+
+This allows for greater flexibility in `struct` definitions as they can begin 
+returning `ref` to their fields. That allows for types like `FrugalList<T>`:
+
+```cs
+struct FrugalList<T>
+{
+    private T _item0;
+    private T _item1;
+    private T _item2;
+
+    public int Count = 3;
+
+    public ref T this[int index]
+    {
+        [RefEscapes]
+        get
+        {
+            switch (index)
+            {
+                case 0: return ref _item1;
+                case 1: return ref _item2;
+                case 1: return ref _item3;
+                default: throw null;
+            }
+        }
+    }
+}
+```
+
+This will naturally, by the existing rules in the span safety spec, allow
+for returning transitive fields in addition to direct fields.
+
+```cs
+struct ListWithDefault<T>
+{
+    private FrugalList<T> _list;
+    private T _default;
+
+    public ref T this[int index]
+    {
+        [RefEscapes]
+        get
+        {
+            if (index >= _list.Count)
+            {
+                return ref _default;
+            }
+
+            return ref _list[index];
+        }
+    }
+}
+```
+
+Members which contain the `[RefEscapes]` attribute cannot be used to implement 
+interface members. This would hide the lifetime nature of the member at 
+the `interface` call site and would lead to incorrect lifetime calculations.
+
+To account for this change the "Parameters" section of the span safety document
+will be updated to include the following:
+
+- If the parameter is the `this` parameter of a `struct` type, it is 
+*ref-safe-to-escape* to the top scope of the enclosing method unless the 
+method is annotated with `[RefEscapes]` in which case it is *ref-safe-to-escape*
+outside the enclosing method.
+
+Misc Notes:
+- A member marked as `[RefEscapes]` can not implement an `interface` method.
+- The `RefEscapesAttribute` will be defined in the 
+`System.Runtime.CompilerServices` namespace.
 
 ### Provide parameter escape annotations
+**CUT THIS DISCUSSION**
 The rules for calculated the escape scopes of parameters are all inferred from 
 their declarations:
 
@@ -472,6 +595,8 @@ Misc Notes:
 - A member marked as `[RefEscapes]` can not implement an `interface` method.
 - The `RefEscapesAttribute` and `RefDoesNotEscapeAttribute` will be defined
 in the `System.Runtime.CompilerServices` namespace.
+
+
 
 
 **temporary life times need to be maintained for returns**
