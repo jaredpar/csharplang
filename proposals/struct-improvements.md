@@ -110,10 +110,14 @@ To do this we will change the escape rules for a constructor on a `ref struct`
 that directly contains a `ref` field as follows:
 - If the constructor contains any `ref struct` parameters then the 
 *safe-to-escape* of the return will be the current method scope
-- If the constructor contains any `in / out / ref` parameters that do not refer
-to reference types then the *safe-to-escape* of the return will be the current
+- If the constructor contains any `in / out / ref` parameters then the 
+*safe-to-escape* of the return will be the current
 method scope.
 - Else the *safe-to-escape* will be the outside the enclosing method
+
+**NEED TO CHANGE TO CONSTRUCTOR INVOCATION TO CATCH THE THIS CALL**
+
+***EXAMPLES**
 
 The limiting of this rule to `ref struct` that directly contain a `ref field` 
 is an important compatibility concern. Consider that the majority of `ref struct`
@@ -136,11 +140,15 @@ ref struct Example
 }
 ```
 
+***EXAMPLES of Indirect***
+
 The rules for assignment of need to be adjusted when the lvalue is a `ref field`
 and the assignment is occurring by reference. Given an assignment from an
 (rvalue) expression E1 which has a *ref-safe-to-escape* scope S1 to a `ref` 
 field expression E2 with a *safe-to-escape* scope S2, it is an error if S2 
 is larger than S1. 
+
+**EXAMPLES OF WHY**
 
 A `ref` field will be emitted into metadata using the `ELEMENT_TYPE_BYREF` 
 signature. This is no different than how we emit `ref` locals or `ref` 
@@ -222,7 +230,7 @@ The first attribute, `[RefEscapes]`, allows for greater flexibility in
 allows for definitions like `FrugalList<T>`:
 
 ```cs
-ref struct FrugalList<T>
+struct FrugalList<T>
 {
     private T _item0;
     private T _item1;
