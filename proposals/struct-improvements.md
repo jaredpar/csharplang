@@ -266,34 +266,50 @@ ref struct RS4
 }
 ```
 
-The rules for assignment  need to be adjusted when the lvalue is a `ref field`
-and the assignment is occurring by reference. Given an assignment from an
-(lvalue) expression E1 which has a *ref-safe-to-escape* scope S1 to a `ref` 
-field expression E2 with a *safe-to-escape* scope S2, it is an error if S2 
-is larger than S1.
+The rules for assignment also need to be adjusted to account for `ref` fields.
+It is only legal to `ref` assign a `ref` field in the constructor of the 
+declaring type. Further the `ref` being assigned must have a 
+*ref-safe-to-escape* scope outside the constructor method.
+
+General `ref` assignment of `ref` fields outside the constructor are not allowed
+because it would allow for scenarios like the following:
 
 ```cs
 ref struct SmallSpan
 {
     public ref int _field;
 
-    void Example(ref SmallSpan parameter, int )
+    // Notice once again we're back at the same problem as the original 
+    // CreateSpan method: a method returning a ref struct and taking a ref
+    // parameter
+    SmallSpan TrickyRefAssignment(ref int i)
     {
+        // *safe-to-escape* is outside the current method
+        SmallSpan s = default;
+
+        // The *ref-safe-to-escape* of 'i' is the same as the *safe-to-escape*
+        // of 's' hence most assignment rules would allow it.
+        ref s._field = ref i;
+
+        return s;
+    }
+
+    SmallSpan BadUsage()
+    {
+        // If allowed this would accidentally smuggle a reference to 'i' to the
+        // caller of BadUsage
         int i = 0;
-
-        // Error: the *safe-to-escape* scope of 'parameter' (E2) is outside the 
-        // current method while the *ref-safe-to-escape* scope of 'i' (E1) is
-        // the current scope
-        ref parameter._field = ref i;
-
+        return TrickyRefAssignment(ref i);
     }
 }
-
 ```
 
-
-
-**EXAMPLES OF WHY**
+General `ref` assignment of `ref` fields could be allowed in the cases where we
+knew the receiver had a *safe-to-escape* scope that was not outside the current
+method scope. That is not a practical sample though hence this special case will
+not be allowed. In the future if it becomes easy to declare locals that have 
+*safe-to-escape* scopes which are not outside the current method then this 
+should be reconsidered.
 
 A `ref` field will be emitted into metadata using the `ELEMENT_TYPE_BYREF` 
 signature. This is no different than how we emit `ref` locals or `ref` 
