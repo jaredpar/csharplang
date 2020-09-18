@@ -311,9 +311,9 @@ ref struct SmallSpan
 General `ref` assignment of `ref` fields could be allowed in the cases where we
 knew the receiver had a *safe-to-escape* scope that was not outside the current
 method scope. That is not a practical sample though hence this special case will
-not be allowed. In the future if it becomes easy to declare locals that have 
-*safe-to-escape* scopes which are not outside the current method then this 
-should be reconsidered.
+not be allowed. In the future if it becomes easy to [declare locals](https://github.com/dotnet/csharplang/discussions/1130)
+that have *safe-to-escape* scopes which are not outside the current method then
+this should be reconsidered.
 
 A `ref` field will be emitted into metadata using the `ELEMENT_TYPE_BYREF` 
 signature. This is no different than how we emit `ref` locals or `ref` 
@@ -481,129 +481,92 @@ Misc Notes:
 - The `RefEscapesAttribute` will be defined in the 
 `System.Runtime.CompilerServices` namespace.
 
+### Safe fixed size buffers
+
+
 ### Provide parameter escape annotations
-**CUT THIS DISCUSSION**
-The rules for calculated the escape scopes of parameters are all inferred from 
-their declarations:
+**THIS SECTION NEEDS WORK**
+One of the rules that causes repeated friction in low level code is the 
+"Method Arguments must Match" rule. That rule states that in the case a a method
+call has at least one `ref struct` passed by `ref / out` then none of the 
+other parameters can have a *safe-to-escape* value narrower than that parameter.
+By extension if there are two such parameters then the *safe-to-escape* of 
+all parameters must be equal.
 
-- `this` cannot escape as `ref` which restricts it *ref-safe-to-escape* scope.
-- `ref`, `out` or `in` parameters escape as `ref` which impact the 
-*ref-safe-to-escape* of returns as well as combinations of arguments.
-
-The defaults chosen for these escape scopes are reasonable for the majority of 
-programs. However there are many cases where the inferred escape behavior does
-not line up with the actual implementation and this creates friction for 
-developers.
-
-To remove this friction the language will provide two attributes that allow
-developers to be explicit about the lifetime of `this` and `ref`, `out` and 
-`in` parameters. These parameters are as follows:
-
-`[RefEscapes]`: when applied to an instance method, instance property or 
-instance accessor of a `ref struct` then the `this` parameter will be considered
-*ref-safe-to-escape* to outside the enclosing method.
-`[RefDoesNotEscape]`: when applied to a `ref`, `out` or `in` parameter then that
-parameter will be considered *ref-safe-to-escape* to the top level scope of the 
-enclosing method.
-
-The "Parameters" section of the span safety spec will be adjusted to include 
-these rules. 
-
-The first attribute, `[RefEscapes]`, allows for greater flexibility in 
-`ref struct` definitions as they can begin returning `ref` to their fields. That
-allows for definitions like `FrugalList<T>`:
+This rule exists to prevent scenarios like the following:
 
 ```cs
-struct FrugalList<T>
+struct RS
 {
-    private T _item0;
-    private T _item1;
-    private T _item2;
-
-    public int Count = 3;
-
-    public ref T this[int index]
+    Span<int> _field;
+    void Set(Span<int> p)
     {
-        [RefEscapes]
-        get
-        {
-            switch (index)
-            {
-                case 0: return ref _item1;
-                case 1: return ref _item2;
-                case 1: return ref _item3;
-                default: throw null;
-            }
-        }
+        _field = p;
+    }
+
+    static void DangerousCode(ref RS p)
+    {
+        Span<int> span = stackalloc int[] { 42 };
+
+        // Error: if allowed this would let the method return a pointer to 
+        // the stack
+        p.Set(span);
     }
 }
 ```
 
-This will naturally, by the existing rules in the span safety spec, allow
-for returning transitive fields in addition to direct fields.
+This rule exists because the language must assume that these values can escape
+to their maximum allowed lifetime. In many cases though the method 
+implementations do not escape these values. Hence the friction caused here is 
+unnecessary.
+
+To remove this friction the language will provide the attribute 
+`[DoesNotEscape]`. When applied to parameters the *safe-to-escape* scope of
+the parameter will be considered the top scope of the declaring method. 
+It cannot return outside of it. Likewise the attribute can be applied to 
+instance members, instance properties or instance accessors and it will have
+the same effect on the `this` parameter.
+
+To account for this change the "Parameters" section of the span safety document
+will be updated to include the following:
+
+- If the parameter is marked with `[DoesNotEscape]`it is *safe-to-escape* to the
+top scope of the containing method. Because this value cannot escape from the 
+method it is not considered a part of the general *safe-to-escape* input set 
+when calculating returns of this method.
+
+**THAT RULE ABOVE NEEDS WORK**
 
 ```cs
-ref struct ListWithDefault<T>
+struct RS
 {
-    private FrugalList<T> _list;
-    private T _default;
-
-    public ref T this[int index]
+    Span<int> _field;
+    void Set([DoesNotEscape] Span<int> p)
     {
-        [RefEscapes]
-        get
-        {
-            if (index >= _list.Count)
-            {
-                return ref _default;
-            }
+        // Error: the *safe-to-escape* of p is the top scope of the method while
+        // the *safe-to-escape* of 'this' is outside the method. Hence this is
+        // illegal by the standard assignment rules
+        _field = p; 
+    }
 
-            return ref _list[index];
-        }
+    static RS M(ref RS rs1, [DoesNotEscape]RS rs2)
+    {
+        Span<int> span = stackalloc int[] { 42 };
+
+        // Okay: The parameter here is not a part of the calculated "must match"
+        // set because it can't be returned hence this is legal.
+        p.Set(span);
+
+        // Error: the *safe-to-escape* scope of 'rs2' is the top scope of this
+        // method
+        return rs2;
     }
 }
 ```
-
-Members which contain the `[RefEscapes]` attribute cannot be used to implement 
-interface members. This would hide the lifetime nature of the member at 
-the `interface` call site and would lead to incorrect lifetime calculations.
-
-The second attribute, `[RefDoesNotEscape]`, when placed on a `ref`, `out` or
-`in` parameter prevents it from escaping as `ref` from the method. This means 
-these parameters will not factor into the *ref-safe-to-escape* rules for method
-invocation. 
-
-This is helpful to developer as it provides an escape valve when developers 
-run into the [method arguments must match](https://github.com/dotnet/csharplang/blob/master/proposals/csharp-7.2/span-safety.md#method-arguments-must-match)
-lifetime restriction. These attributes let the developer specify that certain
-parameters do not escape which means they don't need to be considered for that
-calculation.
-
-Together these two attributes will cause the "Parameters" section of the span
-safety doc to be updated to the following:
-
-- If the parameter is a `ref`, `out`, or `in` parameter, it is 
-*ref-safe-to-escape* outside the enclosing method unless it is attributed with
-`[RefDoesNotEscape]` in which case it is *ref-safe-to-escape* to the top-level 
-scope of the enclosing method.
-- If the parameter is the `this` parameter of a `struct` type, it is 
-*ref-safe-to-escape* to the top-level scope of the enclosing method unless the 
-method is annotated with `[RefEscapes]` in which case it is *ref-safe-to-escape*
-outside the enclosing method.
 
 Misc Notes:
-- A member marked as `[RefEscapes]` can not implement an `interface` method.
-- The `RefEscapesAttribute` and `RefDoesNotEscapeAttribute` will be defined
-in the `System.Runtime.CompilerServices` namespace.
-
-
-
-
-**temporary life times need to be maintained for returns**
-**NEED a way to mark a return of a method as "definitely stack allocated**
-https://github.com/dotnet/csharplang/issues/1130
-
-### Safe fixed size buffers
+- The  `DoesNotEscapeAttribute` will be defined in the 
+`System.Runtime.CompilerServices` namespace.
 
 ### ref struct constraint
 
@@ -616,9 +579,9 @@ Detailed restrictions
 
 ### Keywords vs. attributes
 This design calls for using attributes to annotate the new lifetime rules for 
-`ref` and `ref-struct` members. This also could've been done just as easily with
+`struct` members. This also could've been done just as easily with
 contextual keywords. For instance: `scoped` and `escapes` could have been 
-used instead of `DoesNotEscape` and `EscapesThis`.
+used instead of `DoesNotEscape` and `RefEscapes`.
 
 Keywords, even the contextual ones, have a much heavier weight in the language
 than attributes. The use cases these features solve, while very valuable, 
