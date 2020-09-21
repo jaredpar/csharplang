@@ -753,4 +753,86 @@ ref struct StackLinkedListNode<T>
 }
 ```
 
+### Stephen's concerns about Span<T> compat
 
+The question posed is essentially once we have `[RefEscapes]` what happens if we
+attach that to the `Span<T>` indexer? That could potentially break compatibility
+because the compiler today plays by the rules that the indexer returns are
+always safe to escape to the heap.
+
+In order to understand the impact here it's important to review the rules for
+method invocation around *ref-safe-to-escape*. 
+
+> An lvalue resulting from a ref-returning method invocation e1.M(e2, ...) is 
+*ref-safe-to-escape* the smallest of the following scopes:
+> 1. The entire enclosing method
+> 2. The *ref-safe-to-escape* of all ref and out argument expressions (excluding 
+the receiver)
+> 3. For each in parameter of the method, if there is a corresponding expression 
+> that is an lvalue, its *ref-safe-to-escape*, otherwise the nearest enclosing scope
+> 4. the *safe-to-escape* of all argument expressions (including the receiver)
+
+The span safety rule which impacts this scenario the most is the following is 
+item 4 listed above. The span safety doc even mentions that it's critical for
+`Span<T>` (although it fails to give sufficient examples to justify this).
+
+Below are some compatibility samples for the `Span<T>` indexer that we need to
+maintain here:
+
+```cs
+ref int Examples()
+{
+    Span<int> s1 = stackalloc int[5];
+    // ERROR: illegal because the *safe-to-escape* scope of `s1` is the current
+    // method scope hence that limits the *ref-safe-to-escape" to the current
+    // method scope as well.
+    return ref s1[0];
+
+    // SUCCESS: legal because the *safe-to-escape* scope of `s2` is outside
+    // the current method scope hence the *ref-safe-to-escape* is as well
+    Span<int> s2 = default;
+    return ref s2[0];
+}
+```
+
+The initial proposed changes for `[RefEscapes]` were to change item 2 above to
+the following:
+
+- The *ref-safe-to-escape* of all ref and out argument expressions. This
+includes the receiver if it's marked with `[RefEscapes]`.
+
+That would impact the compatibility scenarios as follows assuming `[RefEscapes]`
+was applied to the `Span<int>` indexer:
+
+``` cs
+ref int Examples()
+{
+    Span<int> s1 = stackalloc int[5];
+    // ERROR: This is still an error but now point 2 and point 4 make it so.
+    return ref s1[0];
+
+    // ERROR: This is now made an error by point 2 above. 
+    Span<int> s2 = default;
+    return ref s2[0];
+}
+```
+
+That new error is a critical compatibility break that we can't maintain. The 
+rules need to be adjusted to account for this.
+
+Taking a step back I think part of the issue the initial proposal didn't 
+consider enough is that the rules are already support a `struct` returning 
+it's fields by `ref` when those fields are nominally `ref` fields. Yes `ref`
+fields aren't supported today but if you consider that  all uses of 
+`ByReference<T>` today are effectively `ref` fields then it's clear this is 
+true (else our safety model would simply be unsafe).
+
+That means what we need to focus on is really two related features:
+
+1. Changing the existing rules so they explicitly support returning a `ref` 
+field by `ref`. This is effectively legal today hence the exercise is merely 
+formalizing the rules around it now that developers can declare `ref` fields
+2. Reworking the `[RefEscapes]` proposal such that it is focused on `ref` return
+of non-ref fields. Technically it's okay to apply this to `ref` fields as well
+since it's a restriction of the capabilities but emphasis should be on non-ref
+fields.
