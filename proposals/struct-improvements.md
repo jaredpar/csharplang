@@ -78,8 +78,9 @@ At the same time it is legal to have methods today which take a `ref` parameter
 and return a `Span<T>`.  
 
 ```cs
-Span<T> CreateSpan(ref T value) => ... 
+Span<T> CreateSpan<T>(ref T value) => ... 
 ```
+
 These methods have essentially the same properties as the new `Span<T>`
 constructor yet they have very different lifetime rules. The *safe-to-escape* 
 of the return value of `CreateSpan` is outside the enclosing method that invokes
@@ -95,7 +96,7 @@ like `CreateSpan` remain the same.
 ```cs
 class C
 {
-    Span<T> CreateSpan(ref T value) => ...;
+    Span<T> CreateSpan<T>(ref T value) => ...;
 
     Span<T> Examples<T>(ref T p, T[] array)
     {
@@ -142,20 +143,24 @@ impact.
 ```cs
 ref struct RS
 {
-    ref int _field1;
-    ref object _field2;
+    ref int _field;
 
-    public RS(object[] array) => ...;
-    public RS(ref int i) => ...;
-    public RS(ref object o) => ...;
+    public RS(object[] array)
+    {
+        ...
+    }
+    public RS(ref int i)
+    {
+        ref _field = ref i;
+    }
 
     RS CreateRS(ref i) => ...;
 
-    RS RuleExamples(ref int i, ref object o, object[] array)
+    RS RuleExamples(ref int i, object[] array)
     {
         var rs1 = new RS(ref i);
 
-        // Error by bullet 1: the safe-to-escape scope of 'rs1' is the current
+        // ERROR by bullet 1: the safe-to-escape scope of 'rs1' is the current
         // scope.
         return rs1; 
 
@@ -167,13 +172,13 @@ ref struct RS
 
         int local = 42;
 
-        // Error by bullet 1: the safe-to-escape scope is the current scope
+        // ERROR by bullet 1: the safe-to-escape scope is the current scope
         return new RS(ref local);
-        return new RS(ref o);
+        return new RS(ref i);
 
         // Okay because rules for method calls have not changed.
         return CreateRS(ref local);
-        return CreateRS(ref o);
+        return CreateRS(ref i);
     }
 }
 ```
@@ -188,7 +193,10 @@ important in avoiding examples like the following:
 struct RS1
 {
     ref int _field;
-    public RS1(ref int p) => ...;
+    public RS1(ref int p)
+    {
+        ref _field = ref p;
+    }
 }
 
 ref struct RS2
@@ -200,7 +208,7 @@ ref struct RS2
     }
 
     public RS2(ref int i)  
-        // Error: the *safe-to-escape* return of :this the current method scope
+        // ERROR: the *safe-to-escape* return of :this the current method scope
         // but the 'this' parameter has a *safe-to-escape* outside the current
         // method scope
         : this(new RS1(ref i))
@@ -255,7 +263,7 @@ ref struct RS4
 
     public RS4(ref int i)
     {
-        // Error. Bullet 1 of the new constructor rules gives this newly created
+        // ERROR. Bullet 1 of the new constructor rules gives this newly created
         // Span<T> a *safe-to-escape* of the current scope. The 'this' parameter
         // though has a *safe-to-escape* outside the current method. Hence this
         // is illegal by assignment rules because it's assigning a smaller scope
