@@ -278,6 +278,123 @@ ref struct RS4
 }
 ```
 
+This design also requires that the rules for field lifetimes be expanded as the
+rules today simply don't account for them. It's important to note that our 
+expansion of the rules here is not defining new behavior but rather accounting 
+for behavior that has long existed. The safety rules around using `ref struct` 
+fully acknowledge and account for the possibility that `ref struct` will 
+contain `ref` state. Whether that was implemented as `ByReference<T>` or `ref`
+fields is immaterial. 
+
+As a part of allowing `ref` fields though we must define their rules such that
+they fit into the existing consumption rules for `ref struct`. Specifically this
+must account for the fact that it's legal *today* for a `ref struct` to 
+return it's `ref` state as `ref` to the consumer. This is in fact how the 
+indexer for `Span<T>` is implemented today. 
+
+To understand the proposed changes it's helpful to review the existing rules
+for method invocation around *ref-safe-to-escape* and how they account for 
+a `ref struct` exposing `ref` state today:
+
+> An lvalue resulting from a ref-returning method invocation e1.M(e2, ...) is *ref-safe-to-escape* the smallest of the following scopes:
+> 1. The entire enclosing method
+> 2. The *ref-safe-to-escape* of all ref and out argument expressions (excluding the receiver)
+> 3. For each in parameter of the method, if there is a corresponding expression that is an lvalue, its *ref-safe-to-escape*, otherwise the nearest enclosing scope
+> 4. the *safe-to-escape* of all argument expressions (including the receiver)
+
+The fourth item provides the critical safety point around a `ref struct` 
+exposing `ref` state to callers. When the `ref` state stored in a `ref struct` 
+refers to the stack then the *safe-to-escape* scope for that `ref struct` will 
+be at most the scope which defines the state being referred to. Hence limiting
+the *ref-safe-to-escape* of invocations of a `ref struct` to the 
+*safe-to-escape* scope of the receiver ensures the lifetimes are correct.
+
+Consider as an example the indexer on `Span<T>` which is returning `ref` fields
+by `ref` today. The fourth item here is what provides the safety here:
+
+```cs
+ref int Examples()
+{
+    Span<int> s1 = stackalloc int[5];
+    // ERROR: illegal because the *safe-to-escape* scope of `s1` is the current
+    // method scope hence that limits the *ref-safe-to-escape" to the current
+    // method scope as well.
+    return ref s1[0];
+
+    // SUCCESS: legal because the *safe-to-escape* scope of `s2` is outside
+    // the current method scope hence the *ref-safe-to-escape* is as well
+    Span<int> s2 = default;
+    return ref s2[0];
+}
+```
+
+As such the *ref-safe-to-escape* rules for fields will be adjusted to the 
+following:
+
+> An lvalue designating a reference to a field, e.F, is *ref-safe-to-escape* (by reference) as follows:
+> - If `F` is a `ref` field and `e` is `this`, it is *ref-safe-to-escape* from the enclosing method.
+> - Else if `F` is a `ref` field it's *ref-safe-to-escape* scope is the *safe-to-escape* scope of `e`.
+> - Else if `e` is of a reference type, it is *ref-safe-to-escape* from the enclosing method.
+> - Else it's *ref-safe-to-escape* is taken from the *ref-safe-to-escape* of `e`.
+
+This explicitly allows for `ref` fields being returned as `ref` from a 
+`ref struct` but not normal fields (that will be covered later). 
+
+```cs
+ref struct RS
+{
+    ref int _refField;
+    int _field;
+
+    // Okay: this falls into bullet one above. 
+    public ref int Prop1 => ref _refField;
+
+    // ERROR: This is bullet four above and the *ref-safe-to-escape* of `this`
+    // in a `struct` is the current method scope.
+    public ref int Prop2 => ref _field;
+
+    public RS(int[] array)
+    {
+        ref _refField = ref array[0];
+    }
+
+    public RS(ref int i)
+    {
+        ref _refField = ref i;
+    }
+
+    public RS CreateRS() => ...;
+
+    public ref int M1(RS rs)
+    {
+        ref int local1 = ref rs.Prop1;
+
+        // Okay: this falls into bullet two above and the *safe-to-escape* of
+        // `rs` is outside the current method scope. Hence the *ref-safe-to-escape*
+        // of `local1` is outside the current method scope.
+        return ref local;
+
+        // Okay: this falls into bullet two above and the *safe-to-escape* of
+        // `rs` is outside the current method scope. Hence the *ref-safe-to-escape*
+        // of `local1` is outside the current method scope.
+        //
+        // In fact in this scenario you can guarantee that the value returned
+        // from Prop1 must exist on the heap. 
+        RS local2 = CreateRS();
+        return ref local2.Prop1;
+
+        // ERROR: the *safe-to-escape* of `local4` here is the current method 
+        // scope by the revised constructor rules. This falls into bullet two 
+        // above and hence based on that allowed scope.
+        int local3 = 42;
+        var local4 = new RS(ref local3);
+        return ref local4.Prop1;
+
+    }
+}
+
+```
+
 The rules for assignment also need to be adjusted to account for `ref` fields.
 It is only legal to `ref` assign a `ref` field in the constructor of the 
 declaring type. Further the `ref` being assigned must have a 
