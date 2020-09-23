@@ -1,4 +1,4 @@
-Struct Improvements
+Low Level Struct Improvements
 =====
 
 ## Summary
@@ -8,46 +8,53 @@ various proposals to create a single overarching feature set for `struct`
 improvements.
 
 ## Motivation
+Over the last few releases C# has added a number of low level performance 
+features to the language: `ref` returns, `ref struct`, function pointers, 
+etc. ... These enabled .NET developers to create write highly performant code
+while continuing to leverage the C# language rules for type and memory safety.
+It also allowed the creation of fundamental performance types in the .NET 
+libraries like `Span<T>`.
 
-* The lack of `ref` fields mean that high performance `struct` innovation is 
-limited to the dotnet/runtime repository where they can take advantage of the 
-`ByReference<T>` type (which effectively are `ref` fields). It also means such
-innovation in the runtime lacks necessary compiler safety in a number of cases.
-* Implicit escape safety rules are effective for majority of cases but low level 
-code frequently hits the friction points they create1
-* `out` is assumed to escape even if it doesn't
-* The rules are based on the declaration because the compiler can't peek into 
-method bodies
-* The defaults chosen for these escape scopes are reasonable for the majority of 
-programs. However there are many cases where the inferred escape behavior does
-not line up with the actual implementation and this creates friction for 
-developers.
+As these features have gained traction in the .NET ecosystem developers, both
+internal and external, have been providing us with information on remaining 
+friction points in the ecosystem. Places where they still need to drop to 
+`unsafe` code to get their work, or require the runtime to special case types
+like `Span<T>`. 
+
+This proposal aims to address many of these concerns by building on top of our
+existing low level features. Specifically it aims to:
+
+- Allow `ref struct` types to declare `ref` fields.
+- Allow the runtime to fully define `Span<T>` using the C# type system and 
+remove special case type like `ByReference<T>`
+- Allow `struct` types to return `ref` to their fields.
+- Allow the declaration of safe `fixed` buffers for managed and unmanaged types
+in `struct`
 
 ## Detailed Design 
 The rules for `ref struct` safety are defined in the 
 [span-safety document](https://github.com/dotnet/csharplang/blob/master/proposals/csharp-7.2/span-safety.md). 
-This document will describe the proposed changes to this document as a result of
-this design. Once accepted as an approved feature these changes will be
+This document will describe the required changes to this document as a result of
+this proposal. Once accepted as an approved feature these changes will be
 incorporated into that document.
 
 ### Provide ref fields
 The language will allow developers to declare `ref` fields inside of a 
 `ref struct`. This can be useful for example when encapsulating large 
-mutable `struct` instances or defining new high performance types like `Span<T>`
+mutable `struct` instances or defining high performance types like `Span<T>`
 in libraries besides the runtime.
 
-Today `ref` fields accomplished by using the `ByReference<T>` type which the 
-runtime treats effective as a `ref` field. This means though that only the 
-runtime repository can take full advantage of `ref` field like behavior and 
-all uses of it require manual verification of safety. Part of the 
+Today `ref` fields accomplished in the runtime by using the `ByReference<T>` 
+type which the runtime treats effective as a `ref` field. This means though 
+that only the runtime repository can take full advantage of `ref` field like 
+behavior and all uses of it require manual verification of safety. Part of the 
 [motivation for this work](https://github.com/dotnet/runtime/issues/32060) is
 to remove `ByReference<T>` and use proper `ref` fields in all code bases.
 
 The challenging part about allowing `ref` fields declarations though comes in
 defining rules such that `Span<T>` can be defined using `ref` fields without 
 breaking compatibility with existing code. To understand the challenges here 
-let's first consider the likely changes to `Span<T>` once `ref` fields are 
-supported.
+let's first consider how `Span<T>` will look once `ref` fields are supported.
 
 ```cs
 // This is the eventual definition of Span<T> once we add ref fields into the
@@ -57,8 +64,8 @@ struct Span<T>
     ref T _field;
     int _length;
 
-    // This constructor does not exist today however it is likely to be added as
-    // a part of changing Span<T> to have ref fields. It is a convenient, and
+    // This constructor does not exist today however will be added as a
+    // part of changing Span<T> to have ref fields. It is a convenient, and
     // safe, way to create a length one span over a stack value that today 
     // requires unsafe code.
     public Span(ref T value)
@@ -69,10 +76,21 @@ struct Span<T>
 }
 ```
 
-The constructor defined here presents a problem because it's return values must
+The constructor defined here presents a problem because ita return values must
 necessarily have restricted lifetimes for many inputs. Consider that if a 
 local parameter is passed by `ref` into this constructor that the returned 
 `Span<T>` must have a *safe-to-escape* scope of the local's declaration scope.
+
+```cs
+Span<T> CaptureLocalState()
+{
+    int i = 42;
+    var span = new Span(ref i);
+
+    // This must be an error in the new design.
+    return span;
+}
+```
 
 At the same time it is legal to have methods today which take a `ref` parameter 
 and return a `Span<T>`.  
@@ -110,7 +128,7 @@ class C
         // Legal for any possible value that could be used as an argument
         return CreateSpan(...);
 
-        // Legal today, must remain legal
+        // Legal today
         return new Span<T>(array, 0, array.Length);
 
         // Must error because allowing this would necessarily change the 
@@ -129,12 +147,11 @@ This tension between allowing constructors such as `Span(ref T field)` and
 ensuring compatibility with `ref struct` constructor like `CreateSpan` is a
 key pivot point in the design of `ref` fields.
 
-To do this we will change the escape rules for a constructor invocation on a 
-`ref struct` that directly contains a `ref` field as follows:
-- If the constructor contains any `ref struct` parameters then the 
-*safe-to-escape* of the return will be the current scope
-- If the constructor contains any `in / out / ref` parameters then the 
-*safe-to-escape* of the return will be the current scope.
+To do this we will change the escape rules for a constructor invocation, which
+today are the same as method invocation, on a `ref struct` that **directly** 
+contains a `ref` field as follows:
+- If the constructor contains any `ref struct`, `ref`, `out` or `in` parameters 
+then the *safe-to-escape* of the return will be the current scope
 - Else the *safe-to-escape* will be the outside the method scope
 
 Lets examine these rules in the context of samples to better understand their
@@ -204,7 +221,16 @@ ref struct RS2
     RS1 _field;
     public RS2(RS1 p)
     {
+        // Okay
         _field = p;
+    }
+
+    public RS2(ref int i)
+    {
+        // ERROR: The *safe-to-escape* scope of the constructor here is the 
+        // current method scope while the *safe-to-escape* scope of `this` is
+        // outside the current method scope hence this assignment is illegal
+        _field = new RS1(ref i);
     }
 
     public RS2(ref int i)  
@@ -284,7 +310,7 @@ expansion of the rules here is not defining new behavior but rather accounting
 for behavior that has long existed. The safety rules around using `ref struct` 
 fully acknowledge and account for the possibility that `ref struct` will 
 contain `ref` state. Whether that was implemented as `ByReference<T>` or `ref`
-fields is immaterial. 
+fields is immaterial to those rules.
 
 As a part of allowing `ref` fields though we must define their rules such that
 they fit into the existing consumption rules for `ref struct`. Specifically this
@@ -392,7 +418,6 @@ ref struct RS
 
     }
 }
-
 ```
 
 The rules for assignment also need to be adjusted to account for `ref` fields.
@@ -439,6 +464,11 @@ method scope. That is not a practical sample though hence this special case will
 not be allowed. In the future if it becomes easy to [declare locals](https://github.com/dotnet/csharplang/discussions/1130)
 that have *safe-to-escape* scopes which are not outside the current method then
 this should be reconsidered.
+
+This means though that `ref` fields are effectively `ref readonly`. While this 
+declaration of `ref readonly` fields is allowed by this design it is still 
+optional because there are future avenues available where we could expand the 
+scenarios in which they are assigned.
 
 A `ref` field will be emitted into metadata using the `ELEMENT_TYPE_BYREF` 
 signature. This is no different than how we emit `ref` locals or `ref` 
@@ -489,6 +519,9 @@ Misc Notes:
 - A `ref` field cannot be declared `static`
 - A `ref` field can only be `ref` assigned in the constructor of the declaring
 type.
+- The reference assembly generation process must preserve the presence of a 
+`ref` field inside a `ref struct` 
+- A `ref readonly struct` must declare it's `ref` fields as `ref readonly`
 
 ### Provide struct this escape annotation
 The rules for the scope of `this` in a `struct` limit the *ref-safe-to-escape*
@@ -529,6 +562,34 @@ struct S1 : I1
 
 The justification here is reasonable but it also introduces unnecessary
 friction on `struct` members that don't participate in interface invocations. 
+
+One key compatibility scenario that we have to keep in mind when approaching 
+changes here is the following:
+
+```cs
+struct S1
+{
+    ref int GetValue() => ...
+}
+
+class Example
+{
+    ref int M()
+    {
+        // Okay: this is always allowed no matter how `local` is initialized
+        S1 local = default;
+        return local.GetValue();
+    }
+}
+```
+
+This works because the safety rules for `ref` return today do not take into 
+account the lifetime of `this` (because it can't return a `ref` to internal
+state). This means that `ref` returns from a `struct` can return outside the 
+enclosing method scope except in cases where there are `ref` parameters or a 
+`ref struct` which is not *safe-to-escape* outside the enclosing method scope. 
+Hence the solution here is not as easy as allowing `ref` return of fields in 
+non-interface methods.
 
 To remove this friction the language will provide the attribute `[RefEscapes]`.
 When this attribute is applied to an instance method, instance property or 
@@ -619,7 +680,23 @@ internal struct CharBuffer
 ```
 
 These declarations, much like their `unsafe` counter parts, will define a 
-sequence of `N` elements in the containing type. 
+sequence of `N` elements in the containing type. These members can be accessed 
+with an indexer and can also be converted to `Span<T>` and `ReadOnlySpan<T>` 
+instances.
+
+When indexing into a `fixed` buffer of type `T` the `readonly` state of the 
+container must be taken into account.  If the container is `readonly` then the
+indexer returns `ref readonly T` else it returns `ref T`. 
+
+Accessing a `fixed` buffer without an indexer has no natural type however it is
+convertible to `Span<T>` types. In the case the container is `readonly` the 
+buffer is implicitly convertible to `ReadOnlySpan<T>`, else it can implicitly 
+convert to `Span<T>` or `ReadOnlySpan<T>` (the `Span<T>` conversion is 
+considered *better*). 
+
+The resulting `Span<T>` instance will have a length equal to the size declared
+on the `fixed` buffer. The *safe-to-escape* scope of the returned value will
+be equal to the *safe-to-escape* scope of the container.
 
 For each `fixed` declaration in a type where the element type is `T` the 
 language will generate a corresponding `get` only indexer method whose return
@@ -734,12 +811,6 @@ Misc Notes:
 - The  `DoesNotEscapeAttribute` will be defined in the 
 `System.Runtime.CompilerServices` namespace.
 
-### ref struct constraint
-***THIS SECTION NEEDS WORK***
-
-### ref struct interfaces
-***THIS SECTION NEEDS WORK***
-
 ## Considerations
 
 ### Keywords vs. attributes
@@ -759,73 +830,14 @@ This does mean that program correctness will be defined in terms of attributes
 though. That is a bit of a gray area for the language side of things but an 
 established pattern for the runtime. 
 
-### ref interface and default interface members
-The reason a `ref struct` can't inherit a default interface implementation is
-that it would be a path to allow for a `ref struct` to be boxed. Consider the 
-following example:
-
-```csharp
-interface IBoxer 
-{
-    void Go()
-    {
-        object o = this;
-        Console.WriteLine(o.ToString());
-    }
-}
-
-ref struct S : IBoxer { }
-
-class Util
-{
-    void Use<T>(T box)
-        where T : ref struct, IBoxer
-    {
-        box.Go();
-    }
-
-    void SneakyBox()
-    {
-        // Will box S through IBoxer.Go
-        Use<S>(default);
-    }
-}
-```
-
-The same implementation of `Go` would not be legal on a `ref struct` as the 
-compiler would flag `object o = this` as a boxing operation on a `ref struct`
-instance.
-
-The compiler doesn't, and because of reference assemblies can't, consider method
-body contents when doing analysis. Hence it must assume the worst that all 
-default implemented methods on an `interface` are boxing. This means a `ref 
-struct` cannot inherit them or call into them.
-
 ## Open Issues
-
-### ref struct only interfaces
-Allowing a `ref struct` to implement an standard `interface` definition but not
-allowing it to take advantage of default implemented members does de-value 
-default implementation a bit as it adds a case where default implementations are
-not universally safe.
-
-One potential solution would be to extend the `ref` modifier so it can also 
-apply to `interface` declarations and then restrict a `ref struct` to only 
-implementing a `ref interface`.
-
-That would neatly solve the default implemented member problem as it the 
-compiler would prevent default members on `interface` declarations from doing
-any operation that boxed the value.
-
-At the same time though it would further split the hierarchy. It would mean 
-that we'd eventually have say `IDisposable` and `IRefDisposable`. 
 
 ## Future Considerations
 
-### Future Consideration 1
-
 ## Related Information
+
 ### Issues
+The following issues are all related to this proposal:
 
 - https://github.com/dotnet/csharplang/issues/1130
 - https://github.com/dotnet/csharplang/issues/1147
@@ -835,6 +847,7 @@ that we'd eventually have say `IDisposable` and `IRefDisposable`.
 - https://github.com/dotnet/runtime/issues/32060
 
 ### Proposals
+The following proposals are related to this proposal:
 
 - https://github.com/dotnet/csharplang/blob/725763343ad44a9251b03814e6897d87fe553769/proposals/fixed-sized-buffers.md
 
@@ -850,7 +863,6 @@ ref struct StackLinkedListNode<T>
 
     public bool HasNext => !Unsafe.IsNullRef(ref _next);
 
-    [EscapesRefThis]
     public ref StackLinkedListNode<T> Next 
     {
         get
@@ -877,87 +889,3 @@ ref struct StackLinkedListNode<T>
     }
 }
 ```
-
-### Stephen's concerns about Span<T> compat
-
-The question posed is essentially once we have `[RefEscapes]` what happens if we
-attach that to the `Span<T>` indexer? That could potentially break compatibility
-because the compiler today plays by the rules that the indexer returns are
-always safe to escape to the heap.
-
-In order to understand the impact here it's important to review the rules for
-method invocation around *ref-safe-to-escape*. 
-
-> An lvalue resulting from a ref-returning method invocation e1.M(e2, ...) is 
-*ref-safe-to-escape* the smallest of the following scopes:
-> 1. The entire enclosing method
-> 2. The *ref-safe-to-escape* of all ref and out argument expressions (excluding 
-the receiver)
-> 3. For each in parameter of the method, if there is a corresponding expression 
-> that is an lvalue, its *ref-safe-to-escape*, otherwise the nearest enclosing scope
-> 4. the *safe-to-escape* of all argument expressions (including the receiver)
-
-The span safety rule which impacts this scenario the most is the following is 
-item 4 listed above. The span safety doc even mentions that it's critical for
-`Span<T>` (although it fails to give sufficient examples to justify this).
-
-Below are some compatibility samples for the `Span<T>` indexer that we need to
-maintain here:
-
-```cs
-ref int Examples()
-{
-    Span<int> s1 = stackalloc int[5];
-    // ERROR: illegal because the *safe-to-escape* scope of `s1` is the current
-    // method scope hence that limits the *ref-safe-to-escape" to the current
-    // method scope as well.
-    return ref s1[0];
-
-    // SUCCESS: legal because the *safe-to-escape* scope of `s2` is outside
-    // the current method scope hence the *ref-safe-to-escape* is as well
-    Span<int> s2 = default;
-    return ref s2[0];
-}
-```
-
-The initial proposed changes for `[RefEscapes]` were to change item 2 above to
-the following:
-
-- The *ref-safe-to-escape* of all ref and out argument expressions. This
-includes the receiver if it's marked with `[RefEscapes]`.
-
-That would impact the compatibility scenarios as follows assuming `[RefEscapes]`
-was applied to the `Span<int>` indexer:
-
-``` cs
-ref int Examples()
-{
-    Span<int> s1 = stackalloc int[5];
-    // ERROR: This is still an error but now point 2 and point 4 make it so.
-    return ref s1[0];
-
-    // ERROR: This is now made an error by point 2 above. 
-    Span<int> s2 = default;
-    return ref s2[0];
-}
-```
-
-That new error is a critical compatibility break that we can't maintain. The 
-rules need to be adjusted to account for this.
-
-Taking a step back I think part of the issue the initial proposal didn't 
-consider enough is that the rules are already support a `struct` returning 
-it's fields by `ref` when those fields are nominally `ref` fields. Yes `ref`
-fields aren't supported today but if you consider that  all uses of 
-`ByReference<T>` today are effectively `ref` fields then it's clear this is 
-true (else our safety model would simply be unsafe).
-
-That means what we need to focus on is really two related features:
-
-1. Changing the existing rules so they explicitly support returning a `ref` 
-field by `ref`. This is effectively legal today hence the exercise is merely 
-formalizing the rules around it now that developers can declare `ref` fields
-2. Reworking the `[RefEscapes]` proposal such that it is focused on `ref` return
-of non-ref fields. Technically it's okay to apply this to `ref` fields as well
-since it's a restriction of the capabilities but emphasis should be on non-ref
-fields.
