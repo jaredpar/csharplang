@@ -220,3 +220,6 @@ the type of the receiver:
 where `T1` through `TN` map to the type of the parameters which are marked with
 `[GetResultArgument]` and return type `TReturn` which maps to the return type of
 the attributed method: `TReturn GetResult(T1 t1, ... TN tn)`
+
+The compiler would add an `[Obsolete("magic string")]` attribute to any method 
+marked with `[InterpolatedBuilder]`.
