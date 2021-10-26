@@ -28,7 +28,7 @@ unsafe void M() {
     ... 
 }
 
-M(); // Error: `M` can only be used from an unsafe context
+M(); // Warning: `M` can only be used from an unsafe context
 unsafe { 
     M(); // Okay 
 }
@@ -64,6 +64,24 @@ void Process() {
 
 The rule here is straight forward. If the desire is callers need to use `unsafe` to invoke the API, or differently stated it creates a potential safety issue in the caller, then use `unsafe` as a modifier. If `unsafe` is an implementation detail of the method then use an `unsafe` block.
 
+This allows us to easily enforce semantics we wanted to enforce from the start of `Span<T>`:
+
+```c# 
+public static class MemoryMarshal { 
+    unsafe public static Span<T> CreateSpan(ref T reference, int length) => ...;
+}
+
+void Consume(ref int i) {
+    // Warning: CreateSpan can only be called from an unsafe context
+    Span<T> span = MemoryMarshal.CreateSpan(ref i, 1);
+
+    unsafe {
+        // Okay
+        Span<T> span = MemoryMarshal.CreateSpan(ref i, 1);
+    }
+}
+```
+
 This requires only a small change to C#. The enforcement of `unsafe` moves to APIs that are marked as `unsafe` not whether or not they contain pointer types. Given that all APIs with pointer types required `unsafe` this will not remove any existing diagnostics. 
 
 To maintain back compat this change will only take effect when using `/langversion:11` or higher. This will be a new warning diagnostic. The reason for a warning vs. an error is this is not deemed important enough to be a .NET 7 adoption blocker. Developers should be able to adopt .NET 7, and by extension C# 11, and silence this warning if it's too disruptive. They can then come back to this when it's convenient for them and fix it up. 
@@ -93,6 +111,11 @@ void Process {
 ```
 
 That particular syntax may not be appealing but possible there is a better suggestion out there which is
+
+### Error diagnostic
+The design uses a warning for the diagnostic instead of an error. The justification is the author does not believe this is a scenario that is worth blocking an upgrade to .NET 7 (that would be an effect of making it an error). Hence the choice of warning which gives customers more control. 
+
+It's possible others feel differently here and would like to push for an error.
 
 ## Unresolved questions
 
