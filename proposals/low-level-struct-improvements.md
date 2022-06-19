@@ -1132,3 +1132,188 @@ The proposal prevents this though because it violates the span safety rules. Con
 At that point the line `r = ref i` is illegal by [ref re-assignment rules](#rules-ref-re-assignment). 
 
 These rules were not intended to prevent this behavior but do so as a side effect. It's important to keep this in mind for any future rule update to evaluate the impact to scenarios like this.
+
+## Nested
+
+- `ref` fields
+    - The STE of the value in a `ref` field must be at least as long as the container. 
+    - The STE of the value in a `ref` field is *independent* of the container.
+    - The STE of the value in a parameter is *safe-to-escape* to *calling method*
+- Intsances with `ref` fields
+    - The STE of all `ref` field values is tracked independently of the container
+    - The STE of all `ref` field values is inferred at the object creation, just as the STE of the instance is inferred.
+    
+- Methods
+    - Can return ref-like state which is *safe-to-escape* to *calling method* by return, `ref` parameters, `ref` fields, etc ... 
+    - Heap state is always *safe-to-escape* to *calling method*
+    - It is the responsibility of the **caller** to ensure all escapable input is legal to be assigned to all possible output locations.
+    - The only state that can be escaped from a method is input state and heap allocations.
+
+RFSTE == ref field *safe-to-escape*
+
+```c#
+ref struct R {
+    public ref Span<int> Span;
+}
+
+Span<int> M1(R r) => r.Span; // okay
+Span<int> M2(scoped R r) => r.Span; // okay, scoped does not impact the field STE
+```
+
+The samples looking at two weeks ago:
+
+```c#
+ref struct Data {
+    Span<int> span;
+}
+
+ref struct Container {
+    ref Data Field;
+}
+
+Container CreateContainer(ref Data d)
+{
+    Data local = default;
+
+    // Okay: all input state is STE to calling method
+    return new Container { Field = ref d };
+
+    // Error
+    return new Container { Field = ref local };
+} 
+
+Container CreateContainer2(ref Data d)
+{
+    // STE = calling method
+    // RFSTE = calling method 
+    Container c1 = new Container { Field = ref d };
+
+    // STE = current method
+    // RFSTE = calling method
+    scoped Container c2 = c1;  
+    Span<int> span = stackalloc int[42];
+    c2.Field.span = span; // Error: STE (c2.Field.Span) == calling method
+
+    scoped Data local = c2.Field;
+    local.span = span; // Okay STE == current method
+}
+
+ref struct ReallyEvil
+{ 
+    ref ReallyEvil Field;
+}
+
+// MAMM has to consider that there are three possible outputs of this method
+// 1. assign to `r`
+// 2. ref reassign to `r.Field'
+// 3. assign to `r.Field`
+// Generally though MAMM just has to consider that `r` is a container of `ref` field state
+// that all has the same lifetime
+void SelfAssign(ref ReallyEvil r)
+{
+    r.Field = r;
+
+    // Living up to the title 
+    r.Field = ref r;
+}
+
+void CallSelfAssign()
+{
+    // STE = current method
+    // RSTE = current method
+    // RFSTE = current method
+    ReallyEvil stackRe = stackalloc ...;
+
+    // Okay: every STE is current method
+    SelfAssign(ref stackRe);
+
+    // STE = calling method
+    // RSTE = current method
+    // RFSTE = calling method
+    ReallyEvil re = default;
+
+    // Error: STE (re) is calling method but RSTE (re) is current method
+    SelfAssign(ref re);
+
+    // STE = current method
+    // RSTE = current method
+    // RFSTE = calling method
+    ReallyEvil scopedRe = default;
+
+    // Problem: r.Field = r; violates ref safety in principal
+    // Error: STE (re) is current method but RFSTE (re) is current method
+    SelfAssign(ref scopedRe);
+}
+```
+
+Mapping to lifetime parameters. Lifetime parameters are deliniated by `#` in front of the name. On types they are not declared but rather simply used. 
+
+```c#
+ref struct Span<T> {
+    int length;
+    ref scoped<#a> T 
+}
+
+// Todays code 
+ref struct DoubleField {
+    ref Span<int> Span1;
+    ref Span<int> Span2;
+}
+
+// With explicit lifteimes showing that the RFSTE are bound 
+// together
+ref struct DoubleField {
+    ref scoped<#a> Span<int> Span1;
+    ref scoped<#a> Span<int> Span2;
+}
+```
+
+There are 3 special lifetimes that help with thinking about how to make our current system
+- `#this` bound to the container 
+- `#local` STE of current method
+
+The first parameter to `scoped` is always the STE of the instance, the rest map onto the type
+
+```c#
+scoped Span<int> == scoped<#local> Span<int>
+```
+
+
+```c#
+ref struct Data {
+    Span<int> span;
+}
+
+ref struct Container {
+    ref scoped<#a> Data Field;
+}
+
+scoped<#b, #a> Container CreateContainer(scoped<#output> ref Data d)
+    lifetime #a
+{
+    Data local = default;
+
+    // Okay: all input state is STE to calling method
+    return new Container { Field = ref d };
+
+    // Error
+    return new Container { Field = ref local };
+} 
+
+scoped<#output, #output> Container CreateContainer2(scoped<#output> ref Data d)
+{
+    // STE = calling method
+    // RFSTE = calling method 
+    Container c1 = new Container { Field = ref d };
+
+    // STE = current method
+    // RFSTE = calling method
+    scoped Container c2 = c1;  
+    Span<int> span = stackalloc int[42];
+    c2.Field.span = span; // Error: STE (c2.Field.Span) == calling method
+
+    scoped Data local = c2.Field;
+    local.span = span; // Okay STE == current method
+}
+
+
